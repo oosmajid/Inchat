@@ -499,7 +499,7 @@ CHAT_PAGE = """
 
         // شروع به گرفتن پیام‌ها بعد از ورود کلید
 
-        setInterval(fetchMessages, 2000);
+        setInterval(fetchMessages, 500);
 
     }
 
