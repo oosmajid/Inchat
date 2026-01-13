@@ -8,7 +8,15 @@ from datetime import datetime, timedelta
 
 PORT = 2026
 
-PASSWORD = "9604"
+
+PASSWORD_TO_USER = {
+
+    "9604": "USER_A",
+
+    "2728": "USER_B",
+
+}
+
 
 DB_FILE = "chat_history.txt"
 
@@ -19,8 +27,6 @@ TYPING_USERS = {}
 LAST_SEEN = {} 
 
 LOCKED = threading.Lock()
-
-AUTH_IPS = set()
 
 
 
@@ -356,9 +362,7 @@ CHAT_PAGE = """
 
 <script>
 
-    let myId = localStorage.getItem('u_id') || Math.random().toString(36).substring(7);
-
-    localStorage.setItem('u_id', myId);
+    let myId = "ME"; // فقط برای تشخیص سمت کلاینت؛ سرور با کوکی تصمیم می‌گیرد
 
     let CHAT_KEY = "";
 
@@ -476,11 +480,12 @@ CHAT_PAGE = """
 
         try {
 
-            const res = await fetch(`/get_messages?since=${lastTime}&u_id=${myId}`);
+            const res = await fetch(`/get_messages?since=${lastTime}`);
+
 
             const d = await res.json();
 
-            
+            myId = d.me;
 
             const sb = document.getElementById('status-bar');
 
@@ -663,7 +668,7 @@ CHAT_PAGE = """
 
     async function postAction(path, p) {
 
-        await fetch(path, {method:'POST', body: JSON.stringify({...p, u_id: myId, sender_id: myId})});
+        await fetch(path, {method:'POST', body: JSON.stringify({...p})});
 
         fetchMessages();
 
@@ -800,6 +805,26 @@ threading.Thread(target=clean_typing, daemon=True).start()
 threading.Thread(target=cleanup_data, daemon=True).start()
 
 
+def parse_cookies(cookie_header: str):
+
+    out = {}
+
+    if not cookie_header:
+
+        return out
+
+    parts = cookie_header.split(";")
+
+    for p in parts:
+
+        if "=" in p:
+
+            k, v = p.strip().split("=", 1)
+
+            out[k] = v
+
+    return out
+
 
 
 class ChatHandler(http.server.BaseHTTPRequestHandler):
@@ -808,17 +833,50 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         u = urllib.parse.urlparse(self.path)
 
+        
         if u.path == '/':
 
-            self.send_response(200); self.end_headers()
+            cookies = parse_cookies(self.headers.get("Cookie", ""))
 
-            self.wfile.write((CHAT_PAGE if self.client_address[0] in AUTH_IPS else LOGIN_PAGE).encode())
+            user_id = cookies.get("chat_user")
+
+
+
+            self.send_response(200)
+
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+
+            self.end_headers()
+
+
+
+            self.wfile.write((CHAT_PAGE if user_id in ("USER_A", "USER_B") else LOGIN_PAGE).encode("utf-8"))
+
 
         elif u.path == '/get_messages':
 
             p = urllib.parse.parse_qs(u.query)
 
-            since, uid = float(p.get('since', [0])[0]), p.get('u_id', [''])[0]
+            
+            since = float(p.get('since', [0])[0])
+
+
+            cookies = parse_cookies(self.headers.get("Cookie", ""))
+
+            uid = cookies.get("chat_user", "")
+
+            if uid not in ("USER_A", "USER_B"):
+
+                self.send_response(401)
+
+                self.send_header('Content-type', 'application/json')
+
+                self.end_headers()
+
+                self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
+
+                return
+
 
             self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
 
@@ -852,7 +910,18 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
             if need_save: save_all()
 
-            self.wfile.write(json.dumps({"messages": news, "is_typing": any(k != uid for k in TYPING_USERS.keys()), "other_online": other_online}).encode())
+
+            self.wfile.write(json.dumps({
+
+                "me": uid,
+
+                "messages": news,
+
+                "is_typing": any(k != uid for k in TYPING_USERS.keys()),
+
+                "other_online": other_online
+
+            }).encode())
 
 
 
@@ -862,20 +931,66 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         raw = self.rfile.read(l).decode()
 
+        
         if self.path == '/login':
 
-            if f"p={PASSWORD}" in raw:
+            # raw مثل: p=9604
 
-                AUTH_IPS.add(self.client_address[0])
+            parsed = urllib.parse.parse_qs(raw)
 
-                self.send_response(303); self.send_header('Location', '/'); self.end_headers()
+            p = parsed.get("p", [""])[0]
+
+
+
+            user_id = PASSWORD_TO_USER.get(p)
+
+            if user_id:
+
+                self.send_response(303)
+
+                # کوکی لاگین (برای همه مسیرها)
+
+                self.send_header("Set-Cookie", f"chat_user={user_id}; Path=/; SameSite=Lax")
+
+                self.send_header("Location", "/")
+
+                self.end_headers()
+
+            else:
+
+                self.send_response(303)
+
+                self.send_header("Location", "/")
+
+                self.end_headers()
 
             return
 
 
 
 
+
         body = json.loads(raw)
+
+
+        cookies = parse_cookies(self.headers.get("Cookie", ""))
+
+        uid = cookies.get("chat_user", "")
+
+        if uid not in ("USER_A", "USER_B"):
+
+            self.send_response(401); self.end_headers()
+
+            return
+
+
+
+        # کاربر را از کوکی تحمیل کن (حتی اگر کلاینت چیز دیگری فرستاد)
+
+        body['u_id'] = uid
+
+        body['sender_id'] = uid
+
 
         self.send_response(200); self.end_headers()
 
