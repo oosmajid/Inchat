@@ -118,7 +118,7 @@ CHAT_PAGE = """
 
         * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
 
-        body { background: #efe7dd; margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+        body { background: #efe7dd; margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
 
         
 
@@ -534,7 +534,7 @@ CHAT_PAGE = """
 
         let content = dec(m.data);
 
-        let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')"><b>پاسخ:</b> ${dec(m.reply_text)}</div>` : '';
+        let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${dec(m.reply_text)}</div>` : '';
 
         let react = m.react ? `<div class="reaction">❤️</div>` : '';
 
@@ -546,7 +546,8 @@ CHAT_PAGE = """
 
             ${m.sender_id === myId ? `<span onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
 
-            <span onclick="setReply('${m.id}', '${content.replace(/'/g, "\\'")}')">پاسخ</span>
+            <span onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").substring(0,100)}')">پاسخ</span>
+
 
         </div>`;
 
@@ -722,8 +723,39 @@ def clean_typing():
             for u in to_del: del TYPING_USERS[u]
 
 
+def cleanup_data():
+
+    while True:
+
+        time.sleep(60) # هر یک دقیقه چک کن
+
+        now = time.time()
+
+        with LOCKED:
+            
+
+            # حذف پیام‌های قدیمی‌تر از ۲۴ ساعت (۸۶۴۰۰ ثانیه)
+
+            original_count = len(MESSAGES)
+
+            # فقط پیام‌هایی که کمتر از ۲۴ ساعت سن دارند را نگه دار
+
+            MESSAGES[:] = [m for m in MESSAGES if now - m['timestamp'] < 86400]
+
+            
+
+            # اگر پیامی حذف شد، فایل را بازنویسی کن
+
+            if len(MESSAGES) != original_count:
+
+                save_all()
+
+
+
 
 threading.Thread(target=clean_typing, daemon=True).start()
+threading.Thread(target=cleanup_data, daemon=True).start()
+
 
 
 
