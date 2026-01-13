@@ -762,7 +762,7 @@ def cleanup_data():
         time.sleep(60) # هر یک دقیقه چک کن
 
         now = time.time()
-
+        need_save = False
         with LOCKED:
             
 
@@ -780,7 +780,18 @@ def cleanup_data():
 
             if len(MESSAGES) != original_count:
 
-                save_all()
+                need_save = True
+        
+        if need_save:
+
+            save_all()
+
+def append_one(m):
+
+    with open(DB_FILE, "a", encoding="utf-8") as f:
+
+        f.write(json.dumps(m) + "\n")
+
 
 
 
@@ -811,6 +822,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
             self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
 
+            need_save = False
+
             with LOCKED:
 
                 LAST_SEEN[uid] = time.time()
@@ -819,7 +832,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
                     if m['sender_id'] != uid and not m.get('seen'): 
 
-                        m['seen'] = True; m['updated'] = time.time(); save_all()
+                        m['seen'] = True; m['updated'] = time.time(); need_save = True
 
                 
 
@@ -835,9 +848,11 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
                     other_online = "Online" if diff < 10 else (datetime.now() - timedelta(seconds=diff) + timedelta(hours=3, minutes=30)).strftime("%H:%M")
 
-                
+            news = [dict(m) for m in news]
 
-                self.wfile.write(json.dumps({"messages": news, "is_typing": any(k != uid for k in TYPING_USERS.keys()), "other_online": other_online}).encode())
+            if need_save: save_all()
+
+            self.wfile.write(json.dumps({"messages": news, "is_typing": any(k != uid for k in TYPING_USERS.keys()), "other_online": other_online}).encode())
 
 
 
@@ -864,27 +879,74 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         self.send_response(200); self.end_headers()
 
+        need_append = False
+
+        new_msg = None
+
+
         with LOCKED:
 
             if self.path == '/send_message':
 
                 body.update({'id': str(time.time()), 'timestamp': time.time(), 'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"), 'seen': False, 'react': False})
 
-                MESSAGES.append(body); save_all()
+                MESSAGES.append(body)
+
+                need_append = True
+
+                new_msg = dict(body)
+            
+
+
 
             elif self.path == '/delete_message':
 
                 for m in MESSAGES:
 
-                    if m['id'] == body['id'] and m['sender_id'] == body['u_id']: m['deleted'] = True; m['updated'] = time.time(); save_all(); break
+                    if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
+
+                        m['deleted'] = True
+
+                        m['updated'] = time.time()
+
+                        need_save = True
+
+                        break
+
+
 
             elif self.path == '/react_message':
 
                 for m in MESSAGES:
 
-                    if m['id'] == body['id']: m['react'] = not m.get('react'); m['updated'] = time.time(); save_all(); break
+                    if m['id'] == body['id']:
 
-            elif self.path == '/typing': TYPING_USERS[body['u_id']] = time.time()
+                        m['react'] = not m.get('react')
+
+                        m['updated'] = time.time()
+
+                        need_save = True
+
+                        break
+
+
+
+            elif self.path == '/typing':
+
+                TYPING_USERS[body['u_id']] = time.time()
+
+
+
+        # بیرون لاک
+
+        if need_append:
+
+            append_one(new_msg)
+
+        if need_save:
+
+            save_all()
+
 
 
 
