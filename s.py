@@ -140,7 +140,39 @@ CHAT_PAGE = """
 
         /* Message Bubbles */
 
-        .msg { max-width: 80%; padding: 8px 12px; border-radius: 16px; font-size: 14.5px; position: relative; box-shadow: 0 1px 0.5px rgba(0,0,0,0.15); transition: all 0.2s; user-select: none; }
+        
+        .msg { 
+
+            max-width: 80%; 
+
+            padding: 8px 12px; 
+
+            border-radius: 16px; 
+
+            font-size: 14.5px; 
+
+            position: relative; 
+
+            box-shadow: 0 1px 0.5px rgba(0,0,0,0.15); 
+
+            transition: all 0.2s; 
+
+            
+
+            /* کدهای جدید برای جلوگیری از بیرون زدن متن */
+
+            word-wrap: break-word;      /* برای مرورگرهای قدیمی */
+
+            overflow-wrap: break-word;  /* استاندارد جدید */
+
+            word-break: break-word;     /* شکستن کلمات طولانی */
+
+            user-select: text;          /* اجازه انتخاب متن */
+
+            -webkit-user-select: text;  /* برای آیفون */
+
+        }
+
 
         .sent { background: white; align-self: flex-start; border-top-left-radius: 4px; }
 
