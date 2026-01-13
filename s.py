@@ -881,6 +881,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         need_append = False
 
+        need_save = False
+
         new_msg = None
 
 
