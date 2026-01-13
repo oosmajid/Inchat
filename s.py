@@ -202,6 +202,44 @@ CHAT_PAGE = """
 
         #key-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:#005c4b; z-index:10000; display:flex; justify-content:center; align-items:center; }
 
+
+        #new-msg-bubble {
+
+            display: none;
+
+            position: fixed;
+
+            bottom: 85px;
+
+            left: 50%;
+
+            transform: translateX(-50%);
+
+            background: #00a884;
+
+            color: white;
+
+            padding: 8px 16px;
+
+            border-radius: 20px;
+
+            font-size: 13px;
+
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+
+            cursor: pointer;
+
+            z-index: 1000;
+
+            font-weight: bold;
+
+            animation: fadeIn 0.3s;
+
+        }
+
+        @keyframes fadeIn { from { opacity: 0; bottom: 70px; } to { opacity: 1; bottom: 85px; } }
+
+
     </style>
 
 </head>
@@ -256,6 +294,7 @@ CHAT_PAGE = """
 
 </div>
 
+<div id="new-msg-bubble" onclick="scrollToBottom()">پیام جدید 👇</div>
 
 <div id="input-container">
 
@@ -448,7 +487,22 @@ CHAT_PAGE = """
                 });
 
 
-                if(hasNew && autoScroll) scrollToBottom();
+
+                if(hasNew) {
+
+                    if(autoScroll) {
+
+                        scrollToBottom();
+
+                    } else {
+
+                        // اگر کاربر بالا بود، دکمه "پیام جدید" را نشان بده
+
+                        document.getElementById('new-msg-bubble').style.display = 'block';
+
+                    }
+
+                }
 
             }
 
@@ -586,7 +640,26 @@ CHAT_PAGE = """
 
     function scrollToBottom() { const b = document.getElementById('chat-box'); b.scrollTop = b.scrollHeight; }
 
-    function handleScroll() { const b = document.getElementById('chat-box'); autoScroll = (b.scrollHeight - b.scrollTop - b.clientHeight < 100); }
+
+    function handleScroll() {
+
+        const b = document.getElementById('chat-box');
+
+        // تشخیص اینکه کاربر در انتهای صفحه است یا نه
+
+        autoScroll = (b.scrollHeight - b.scrollTop - b.clientHeight < 100);
+
+        
+
+        // اگر کاربر به پایین رسید، دکمه را مخفی کن
+
+        if (autoScroll) {
+
+            document.getElementById('new-msg-bubble').style.display = 'none';
+
+        }
+
+    }
 
     function deleteMsg(id) { if(confirm("حذف پیام؟")) postAction('/delete_message', {id: id}); }
 
