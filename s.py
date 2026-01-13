@@ -1,30 +1,22 @@
-import http.server
-
-import socketserver
-
-import json
-
-import urllib.parse
-
-import threading
-
-import time
+import http.server, socketserver, json, urllib.parse, threading, time, os
 
 from datetime import datetime, timedelta
 
 
 
-# --- تنظیمات ---
+# --- تنظیمات سرور ---
 
 PORT = 2026
 
 PASSWORD = "9604"
 
+DB_FILE = "chat_history.txt"
+
 MESSAGES = [] 
 
-TYPING_USERS = {} # برای ذخیره زمان آخرین تایپ هر کاربر
+TYPING_USERS = {}
 
-MAX_MESSAGES = 1000
+LAST_SEEN = {} 
 
 LOCKED = threading.Lock()
 
@@ -32,39 +24,25 @@ AUTH_IPS = set()
 
 
 
-# --- حذف خودکار دیتای مدیا و پاکسازی وضعیت تایپ ---
+# --- مدیریت فایل ---
 
-def cleanup_data():
+if os.path.exists(DB_FILE):
 
-    while True:
+    with open(DB_FILE, "r", encoding="utf-8") as f:
 
-        time.sleep(5)
+        for line in f:
 
-        now = time.time()
+            try: MESSAGES.append(json.loads(line))
 
-        with LOCKED:
-
-            # پاکسازی مدیا
-
-            for m in MESSAGES:
-
-                if m['type'] in ['image', 'audio'] and (now - m['timestamp'] > 300):
-
-                    m['data'] = None 
-
-            
-
-            # پاکسازی وضعیت تایپ (اگر بیش از 3 ثانیه از آخرین فعالیت گذشت)
-
-            to_remove = [uid for uid, t in TYPING_USERS.items() if now - t > 3]
-
-            for uid in to_remove:
-
-                del TYPING_USERS[uid]
+            except: pass
 
 
 
-threading.Thread(target=cleanup_data, daemon=True).start()
+def save_all():
+
+    with open(DB_FILE, "w", encoding="utf-8") as f:
+
+        for m in MESSAGES: f.write(json.dumps(m) + "\n")
 
 
 
@@ -76,41 +54,37 @@ LOGIN_PAGE = """
 
 <html lang="fa" dir="rtl">
 
-<head>
+<head><meta charset="UTF-8"><title>ورود</title>
 
-    <meta charset="UTF-8">
+<style>
 
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    body { font-family: 'Tahoma', sans-serif; background: #eceff1; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
 
-    <title>ورود ایمن به این‌چت</title>
+    .card { background: white; padding: 40px; border-radius: 28px; text-align: center; width: 340px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
 
-    <style>
+    h2 { color: #263238; margin-bottom: 20px; }
 
-        body { font-family: Tahoma, sans-serif; background: linear-gradient(135deg, #075e54 0%, #128c7e 100%); display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    input { width: 100%; padding: 15px; margin: 15px 0; border-radius: 12px; border: 1px solid #cfd8dc; text-align: center; outline: none; font-size: 16px; }
 
-        .login-card { background: white; padding: 40px 30px; border-radius: 30px; box-shadow: 0 15px 35px rgba(0,0,0,0.2); text-align: center; width: 90%; max-width: 380px; }
+    button { width: 100%; background: #00796b; color: white; border: none; padding: 15px; border-radius: 12px; cursor: pointer; font-weight: bold; font-size: 16px; transition: 0.3s; }
 
-        h2 { color: #333; margin-bottom: 25px; font-size: 22px; }
+    button:hover { background: #004d40; }
 
-        input { width: 100%; padding: 15px; margin-bottom: 20px; border: 1px solid #eee; border-radius: 15px; background: #f9f9f9; text-align: center; outline: none; }
-
-        button { width: 100%; background: #128c7e; color: white; border: none; padding: 15px; border-radius: 15px; font-weight: bold; cursor: pointer; }
-
-    </style>
+</style>
 
 </head>
 
 <body>
 
-    <div class="login-card">
+    <div class="card">
 
         <h2>ورود به این‌چت</h2>
 
         <form method="POST" action="/login">
 
-            <input type="password" name="p" placeholder="رمز عبور را وارد کنید" required>
+            <input type="password" name="p" placeholder="رمز عبور" required>
 
-            <button type="submit">تایید هویت</button>
+            <button type="submit">ورود امن</button>
 
         </form>
 
@@ -124,7 +98,7 @@ LOGIN_PAGE = """
 
 
 
-# --- صفحه اصلی چت ---
+# --- صفحه چت ---
 
 CHAT_PAGE = """
 
@@ -142,39 +116,91 @@ CHAT_PAGE = """
 
     <style>
 
-        * { box-sizing: border-box; }
+        * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
 
-        body { font-family: Tahoma, sans-serif; background: #e5ddd5; margin: 0; height: 100vh; display: flex; flex-direction: column; }
+        body { background: #efe7dd; margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
 
-        #header { background: #075e54; color: white; padding: 15px; text-align: center; font-weight: bold; }
+        
 
-        #chat-box { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; }
+        /* Header Material */
 
-        .msg { max-width: 85%; padding: 10px; border-radius: 15px; font-size: 15px; position: relative; line-height: 1.5; }
+        #header { background: #005c4b; color: white; padding: 12px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10; display: flex; flex-direction: column; align-items: center; }
 
-        .sent { background: white; align-self: flex-start; border-top-left-radius: 2px; box-shadow: 1px 1px 2px rgba(0,0,0,0.1); }
+        #header b { font-size: 18px; }
 
-        .received { background: #dcf8c6; align-self: flex-end; border-top-right-radius: 2px; box-shadow: -1px 1px 2px rgba(0,0,0,0.1); }
+        #status-bar { font-size: 12px; opacity: 0.9; margin-top: 2px; }
 
-        .reply-area { background: rgba(0,0,0,0.06); padding: 5px 8px; border-right: 3px solid #075e54; font-size: 12px; margin-bottom: 8px; border-radius: 5px; color: #555; }
 
-        .media-content { max-width: 100%; border-radius: 10px; margin-top: 5px; cursor: pointer; }
 
-        .footer-msg { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
+        /* Chat Area */
 
-        .time { font-size: 10px; color: #888; }
+        #chat-box { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 8px; scroll-behavior: smooth; }
 
-        .reply-btn { color: #075e54; font-size: 11px; border: none; background: none; cursor: pointer; font-weight: bold; }
+        
 
-        #typing-status { padding: 5px 20px; font-size: 12px; color: #075e54; height: 20px; font-style: italic; }
+        /* Message Bubbles */
 
-        #reply-preview { display: none; background: #f7f7f7; padding: 10px 20px; border-top: 1px solid #ddd; justify-content: space-between; align-items: center; }
+        .msg { max-width: 80%; padding: 8px 12px; border-radius: 16px; font-size: 14.5px; position: relative; box-shadow: 0 1px 0.5px rgba(0,0,0,0.15); transition: all 0.2s; user-select: none; }
 
-        #input-area { background: #f0f0f0; padding: 10px; display: flex; gap: 10px; align-items: center; border-top: 1px solid #ddd; }
+        .sent { background: white; align-self: flex-start; border-top-left-radius: 4px; }
 
-        #msgInput { flex: 1; border: none; padding: 12px 18px; border-radius: 25px; outline: none; font-size: 16px; background: white; }
+        .received { background: #d9fdd3; align-self: flex-end; border-top-right-radius: 4px; }
 
-        .circle-btn { background: #075e54; color: white; border: none; width: 45px; height: 45px; border-radius: 50%; cursor: pointer; font-size: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+        .highlight { background: #fff59d !important; }
+
+
+
+        /* Reactions */
+
+        .reaction { position: absolute; bottom: -10px; left: 10px; background: white; border-radius: 10px; padding: 2px 4px; font-size: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+
+
+
+        .reply-area { background: rgba(0,0,0,0.04); padding: 6px; border-right: 4px solid #00a884; font-size: 11.5px; margin-bottom: 6px; border-radius: 6px; cursor: pointer; color: #54656f; }
+
+        
+
+        .footer-info { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #667781; margin-top: 4px; }
+
+        .seen-status { color: #53bdeb; font-weight: bold; margin-right: 4px; }
+
+
+
+        .msg-actions { font-size: 10px; margin-top: 6px; display: flex; gap: 12px; color: #00796b; border-top: 1px solid rgba(0,0,0,0.05); padding-top: 4px; }
+
+        .msg-actions span { cursor: pointer; font-weight: 500; }
+
+
+
+        #typing-status { height: 20px; font-size: 12px; color: #667781; padding: 0 25px; font-style: italic; }
+
+        
+
+        /* Input Area Material */
+
+        #input-container { background: #f0f2f5; padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid #d1d7db; }
+
+        
+
+        #msgInput { flex: 1; border: none; padding: 10px 15px; border-radius: 20px; outline: none; font-size: 15px; max-height: 120px; min-height: 40px; resize: none; background: white; line-height: 20px; }
+
+        
+
+        .icon-btn { background: transparent; border: none; cursor: pointer; padding: 8px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+
+        .icon-btn:hover { background: rgba(0,0,0,0.05); }
+
+        .icon-btn svg { fill: #54656f; width: 24px; height: 24px; }
+
+        .send-btn svg { fill: #00a884; }
+
+
+
+        #reply-preview { display: none; background: #f0f2f5; padding: 10px 20px; border-top: 1px solid #d1d7db; justify-content: space-between; align-items: center; }
+
+
+
+        #key-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:#005c4b; z-index:10000; display:flex; justify-content:center; align-items:center; }
 
     </style>
 
@@ -182,41 +208,78 @@ CHAT_PAGE = """
 
 <body>
 
-    <div id="header">این‌چت</div>
 
-    <div id="chat-box"></div>
 
-    <div id="typing-status"></div>
+<div id="key-overlay">
+
+    <div style="background:white; padding:35px; border-radius:28px; width:340px; text-align:center; box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+
+        <h3 style="margin-top:0; color:#263238;">🔐 بازگشایی گفت‌وگو</h3>
+
+        <input type="password" id="kInp" style="width:100%; padding:15px; margin-bottom:20px; border:1px solid #cfd8dc; border-radius:12px; text-align:center; font-size:18px;" placeholder="کلید محرمانه">
+
+        <button onclick="startChat()" style="width:100%; background:#00a884; color:white; border:none; padding:15px; border-radius:12px; font-weight:bold; cursor:pointer;">تایید</button>
+
+    </div>
+
+</div>
+
+
+
+<div id="header">
+
+    <b>این‌چت</b>
+
+    <div id="status-bar">درحال اتصال...</div>
+
+</div>
+
+
+
+<div id="chat-box" onscroll="handleScroll()"></div>
+
+<div id="typing-status"></div>
+
+
+
+<div id="reply-preview">
+
+    <div style="border-right: 4px solid #00a884; padding-right: 10px;">
+
+        <div style="font-size:12px; color:#00a884; font-weight:bold;">پاسخ به:</div>
+
+        <div id="reply-text" style="font-size:13px; color:#54656f;"></div>
+
+    </div>
+
+    <span onclick="cancelReply()" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
+
+</div>
+
+
+<div id="input-container">
+
+    <button class="icon-btn send-btn" onclick="sendTxt()">
+
+        <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+
+    </button>
 
     
 
-    <div id="reply-preview">
-
-        <div style="border-right: 3px solid #075e54; padding-right: 10px;">
-
-            <div style="font-size: 11px; color: #075e54; font-weight: bold;">پاسخ به:</div>
-
-            <div id="reply-text" style="font-size: 13px; color: #666;"></div>
-
-        </div>
-
-        <button onclick="cancelReply()" style="border:none; background:none; font-size:20px; color:#888;">✕</button>
-
-    </div>
+    <textarea id="msgInput" placeholder="پیام بنویسید..." rows="1" oninput="autoGrow(this)"></textarea>
 
 
 
-    <div id="input-area">
+    <button class="icon-btn" onclick="document.getElementById('fInp').click()">
 
-        <button class="circle-btn" onclick="document.getElementById('fileInput').click()">📷</button>
+        <svg viewBox="0 0 24 24"><path d="M19 7v2.99s-1.99.01-2 0V7h-3s.01-1.99 0-2h3V2h2v3h3v2h-3zm-3 4V8h-3V5H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8h-3zM5 19l3-4 2 3 3-4 4 5H5z"/></svg>
 
-        <input type="file" id="fileInput" hidden accept="image/*" onchange="confirmImage(this)">
+    </button>
 
-        <input type="text" id="msgInput" placeholder="پیام شما..." autocomplete="off">
+    <input type="file" id="fInp" hidden accept="image/*" onchange="sendImg(this)">
 
-        <button class="circle-btn" onclick="sendText()">🚀</button>
-
-    </div>
+</div>
 
 
 
@@ -226,15 +289,35 @@ CHAT_PAGE = """
 
     localStorage.setItem('u_id', myId);
 
-
+    let CHAT_KEY = "";
 
     let lastTime = 0;
 
     let replyingTo = null;
 
+    let autoScroll = true;
 
 
-    function playSoftDing() {
+
+    function startChat() {
+
+        let v = document.getElementById('kInp').value;
+
+        if(!v) return;
+
+        CHAT_KEY = v;
+
+        document.getElementById('key-overlay').style.display = 'none';
+
+        setInterval(fetchMessages, 2000);
+
+    }
+
+
+
+    // --- صدای بیپ ---
+
+    function playDing() {
 
         try {
 
@@ -248,63 +331,15 @@ CHAT_PAGE = """
 
             osc.type = 'sine';
 
-            osc.frequency.setValueAtTime(660, ctx.currentTime);
+            osc.frequency.setValueAtTime(580, ctx.currentTime);
 
             gain.gain.setValueAtTime(0, ctx.currentTime);
 
-            gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + 0.05);
+            gain.gain.linearRampToValueAtTime(0.1, ctx.currentTime + 0.01);
 
-            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
+            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
 
-            osc.start(); osc.stop(ctx.currentTime + 0.6);
-
-        } catch(e) {}
-
-    }
-
-
-
-    async function fetchMessages() {
-
-        try {
-
-            const res = await fetch(`/get_messages?since=${lastTime}&u_id=${myId}`);
-
-            const data = await res.json();
-
-            
-
-            // نمایش وضعیت تایپ
-
-            const typingDiv = document.getElementById('typing-status');
-
-            typingDiv.innerText = data.is_typing ? "طرف مقابل در حال تایپ..." : "";
-
-
-
-            const news = data.messages;
-
-            if (news.length > 0) {
-
-                if (lastTime !== 0 && news[news.length-1].sender_id !== myId) playSoftDing();
-
-                news.forEach(m => {
-
-                    if (m.timestamp > lastTime) {
-
-                        render(m);
-
-                        lastTime = m.timestamp;
-
-                    }
-
-                });
-
-                const box = document.getElementById('chat-box');
-
-                box.scrollTop = box.scrollHeight;
-
-            }
+            osc.start(); osc.stop(ctx.currentTime + 0.5);
 
         } catch(e) {}
 
@@ -312,200 +347,7 @@ CHAT_PAGE = """
 
 
 
-    async function render(m) {
-
-        const box = document.getElementById('chat-box');
-
-        const div = document.createElement('div');
-
-        div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
-
-        
-
-        // رمزگشایی متن یا تصویر
-
-        let decryptedContent = m.data;
-
-        if (m.iv) {
-
-            decryptedContent = decryptData(m.data, m.iv);
-
-        }
-
-
-
-        let content = '';
-
-        if (m.type === 'text') content = `<div>${decryptedContent}</div>`;
-
-        else if (m.type === 'image') {
-
-            content = m.data ? `<img src="${decryptedContent}" class="media-content" onclick="window.open(this.src)">` : `<i style="color:#999">🖼️ منقضی شده</i>`;
-
-        }
-
-
-
-        div.innerHTML = `
-
-            ${m.reply_to ? `<div class="reply-area">${m.reply_to}</div>` : ''}
-
-            ${content}
-
-            <div class="footer-msg">
-
-                <button class="reply-btn" onclick="setReply('${m.type=='text' ? decryptedContent : 'تصویر'}')">پاسخ</button>
-
-                <div class="time">${m.time}</div>
-
-            </div>
-
-        `;
-
-        box.appendChild(div);
-
-    }
-
-
-
-
-    // ارسال سیگنال تایپ کردن
-
-    const msgInput = document.getElementById('msgInput');
-
-    msgInput.addEventListener('input', () => {
-
-        fetch('/typing', { method: 'POST', body: JSON.stringify({u_id: myId}) });
-
-    });
-
-
-
-    function sendText() {
-
-        if(!msgInput.value.trim()) return;
-
-        post({type: 'text', data: msgInput.value});
-
-        msgInput.value = '';
-
-    }
-
-
-
-    function confirmImage(input) {
-
-        if(input.files[0]) {
-
-            if(confirm("آیا مایل به ارسال این تصویر هستید؟")) {
-
-                const r = new FileReader();
-
-                r.onload = e => post({type: 'image', data: e.target.result});
-
-                r.readAsDataURL(input.files[0]);
-
-            }
-
-            input.value = '';
-
-        }
-
-    }
-
-
-
-    function setReply(text) {
-
-        replyingTo = text.substring(0, 40);
-
-        document.getElementById('reply-preview').style.display = 'flex';
-
-        document.getElementById('reply-text').innerText = replyingTo + "...";
-
-        msgInput.focus();
-
-    }
-
-
-
-    function cancelReply() {
-
-        replyingTo = null;
-
-        document.getElementById('reply-preview').style.display = 'none';
-
-    }
-
-
-
-
-    async function post(payload) {
-
-        // رمزنگاری محتوا قبل از ارسال به سرور
-
-        const encrypted = encryptData(payload.data);
-
-        const securePayload = {
-
-            ...payload,
-
-            data: encrypted.cipher,
-
-            iv: encrypted.iv, // IV برای رمزنگاری لازم است
-
-            sender_id: myId,
-
-            reply_to: replyingTo
-
-        };
-
-
-
-        await fetch('/send_message', { method: 'POST', body: JSON.stringify(securePayload) });
-
-        cancelReply();
-
-        fetchMessages();
-
-    }
-
-
-
-
-    // کلید رمزنگاری که فقط در مرورگر می‌ماند
-
-    
-    
-    let CHAT_KEY = "";
-
-
-
-    function saveKeyAndStart() {
-
-        const input = document.getElementById('chatKeyInput');
-
-        if (input.value.trim() === "") {
-
-            alert("لطفا کلید را وارد کنید");
-
-            return;
-
-        }
-
-        CHAT_KEY = input.value;
-
-        document.getElementById('key-overlay').style.display = 'none';
-
-        // شروع به گرفتن پیام‌ها بعد از ورود کلید
-
-        setInterval(fetchMessages, 500);
-
-    }
-
-
-
-    // الگوریتم RC4 (بدون نیاز به کتابخانه و کاملا آفلاین)
+    // --- رمزنگاری ---
 
     function rc4(key, str) {
 
@@ -525,9 +367,7 @@ CHAT_PAGE = """
 
         for (var y = 0; y < str.length; y++) {
 
-            i = (i + 1) % 256;
-
-            j = (j + s[i]) % 256;
+            i = (i + 1) % 256; j = (j + s[i]) % 256;
 
             x = s[i]; s[i] = s[j]; s[j] = x;
 
@@ -539,75 +379,280 @@ CHAT_PAGE = """
 
     }
 
+    function enc(t) { return btoa(rc4(CHAT_KEY, unescape(encodeURIComponent(t)))); }
 
+    function dec(t) { 
 
-    function encodeUTF8(s) { return unescape(encodeURIComponent(s)); }
+        if(!t) return "";
 
-    function decodeUTF8(s) { return decodeURIComponent(escape(s)); }
-
-
-
-    // توابع رمزنگاری ساده و سریع
-
-    function encryptData(text) {
-
-        const cipher = rc4(CHAT_KEY, encodeUTF8(text));
-
-        return { cipher: btoa(cipher), iv: "off" };
+        try { return decodeURIComponent(escape(rc4(CHAT_KEY, atob(t)))); } catch(e) { return "❌"; } 
 
     }
 
 
 
-    function decryptData(cipher) {
+    function autoGrow(el) {
+
+        el.style.height = '40px';
+
+        el.style.height = (el.scrollHeight) + 'px';
+
+    }
+
+
+
+    async function fetchMessages() {
 
         try {
 
-            const decoded = atob(cipher);
+            const res = await fetch(`/get_messages?since=${lastTime}&u_id=${myId}`);
 
-            const decrypted = rc4(CHAT_KEY, decoded);
+            const d = await res.json();
 
-            return decodeUTF8(decrypted);
+            
 
-        } catch (e) { return "❌ خطا در رمزگشایی"; }
+            const sb = document.getElementById('status-bar');
+
+            sb.innerHTML = d.other_online === "Online" ? '<b style="color:#1df0bc">● آنلاین</b>' : "آخرین بازدید: " + d.other_online;
+
+
+
+            document.getElementById('typing-status').innerText = d.is_typing ? "طرف مقابل در حال نوشتن..." : "";
+
+            
+
+            if(d.messages.length > 0) {
+
+                let hasNew = false;
+
+                 d.messages.forEach(m => {
+
+                    if(m.timestamp > lastTime || m.updated) {
+
+                        // اگر پیام جدید از طرف مقابل بود، بلافاصله متن تایپ را پاک کن
+
+                        if(m.timestamp > lastTime && m.sender_id !== myId) {
+
+                            playDing();
+
+                            document.getElementById('typing-status').innerText = ""; 
+
+                        }
+
+                        render(m);
+
+                        if(m.timestamp > lastTime) { lastTime = m.timestamp; hasNew = true; }
+
+                    }
+
+                });
+
+
+                if(hasNew && autoScroll) scrollToBottom();
+
+            }
+
+        } catch(e) {}
 
     }
 
 
 
+    function render(m) {
 
-    msgInput.addEventListener('keypress', e => {if(e.key==='Enter') sendText()});
+        const box = document.getElementById('chat-box');
+
+        let old = document.getElementById('msg-' + m.id);
+
+        if(m.deleted) { if(old) old.remove(); return; }
+
+
+
+        const div = old || document.createElement('div');
+
+        div.id = 'msg-' + m.id;
+
+        div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
+
+        div.ondblclick = () => postAction('/react_message', {id: m.id});
+
+        
+
+        let content = dec(m.data);
+
+        let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')"><b>پاسخ:</b> ${dec(m.reply_text)}</div>` : '';
+
+        let react = m.react ? `<div class="reaction">❤️</div>` : '';
+
+        let seen = (m.sender_id === myId && m.seen) ? '<span class="seen-status">✓✓</span>' : (m.sender_id === myId ? '✓' : '');
+
+        
+
+        let actions = `<div class="msg-actions">
+
+            ${m.sender_id === myId ? `<span onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
+
+            <span onclick="setReply('${m.id}', '${content.replace(/'/g, "\\'")}')">پاسخ</span>
+
+        </div>`;
+
+
+
+        let body = m.type === 'image' ? `<img src="${content}" style="max-width:100%; border-radius:12px;">` : `<div>${content}</div>`;
+
+        
+
+        div.innerHTML = `${reply} ${body} ${react} <div class="footer-info"><span>${m.time}</span> ${seen}</div> ${actions}`;
+
+        if(!old) box.appendChild(div);
+
+    }
+
+
+
+    function setReply(id, text) {
+
+        replyingTo = {id: id, text: text};
+
+        const rp = document.getElementById('reply-preview');
+
+        rp.style.display = 'flex';
+
+        document.getElementById('reply-text').innerText = text.substring(0, 50);
+
+        document.getElementById('msgInput').focus();
+
+    }
+
+    function cancelReply() { replyingTo = null; document.getElementById('reply-preview').style.display = 'none'; }
+
+
+
+    function sendTxt() {
+
+        let i = document.getElementById('msgInput');
+
+        if(!i.value.trim()) return;
+
+        postAction('/send_message', {
+
+            type:'text', data: enc(i.value), 
+
+            reply_id: replyingTo ? replyingTo.id : null,
+
+            reply_text: replyingTo ? enc(replyingTo.text) : null
+
+        });
+
+        i.value = ''; i.style.height = '40px'; cancelReply();
+
+    }
+
+
+
+    function sendImg(input) {
+
+        if(input.files[0]) {
+
+            let r = new FileReader();
+
+            r.onload = e => postAction('/send_message', {
+
+                type:'image', data: enc(e.target.result), 
+
+                reply_id: replyingTo ? replyingTo.id : null,
+
+                reply_text: replyingTo ? enc(replyingTo.text) : null
+
+            });
+
+            r.readAsDataURL(input.files[0]);
+
+        }
+
+    }
+
+
+
+    async function postAction(path, p) {
+
+        await fetch(path, {method:'POST', body: JSON.stringify({...p, u_id: myId, sender_id: myId})});
+
+        fetchMessages();
+
+    }
+
+
+
+    function scrollToBottom() { const b = document.getElementById('chat-box'); b.scrollTop = b.scrollHeight; }
+
+    function handleScroll() { const b = document.getElementById('chat-box'); autoScroll = (b.scrollHeight - b.scrollTop - b.clientHeight < 100); }
+
+    function deleteMsg(id) { if(confirm("حذف پیام؟")) postAction('/delete_message', {id: id}); }
+
+    function scrollToMsg(id) {
+
+        const el = document.getElementById('msg-' + id);
+
+        if(el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('highlight'); setTimeout(()=>el.classList.remove('highlight'), 1500); }
+
+    }
+
+
+
+    document.getElementById('msgInput').oninput = (e) => {
+
+        autoGrow(e.target);
+
+        fetch('/typing', {method:'POST', body: JSON.stringify({u_id: myId})});
+
+    };
+
+     // اضافه کردن قابلیت ارسال با Enter
+
+    document.getElementById('msgInput').addEventListener('keydown', function(e) {
+
+        if (e.key === 'Enter' && !e.shiftKey) { // ارسال با اینتر و خط جدید با شیفت+اینتر
+
+            e.preventDefault(); // جلوگیری از ایجاد خط جدید در تکست‌اریا
+
+            sendTxt();
+
+        }
+
+    });
+
 
 </script>
 
 </body>
-
-<!-- لایه ورود کلید امنیتی -->
-
-<div id="key-overlay" style="position:fixed; top:0; left:0; width:100%; height:100%; background:#075e54; z-index:9999; display:flex; flex-direction:column; justify-content:center; align-items:center; color:white; font-family:Tahoma, sans-serif;">
-
-    <div style="background:white; padding:30px; border-radius:20px; width:85%; max-width:350px; text-align:center; color:#333; box-shadow:0 10px 25px rgba(0,0,0,0.3);">
-
-        <h3 style="margin-top:0;">🔑 ورود به گفت‌وگو</h3>
-
-        <p style="font-size:13px; color:#666;">کلید محرمانه مشترک را وارد کنید:</p>
-
-        <input type="password" id="chatKeyInput" style="width:100%; padding:12px; border:1px solid #ddd; border-radius:10px; margin-bottom:20px; text-align:center; outline:none;" placeholder="کلید محرمانه">
-
-        <button onclick="saveKeyAndStart()" style="width:100%; background:#128c7e; color:white; border:none; padding:12px; border-radius:10px; font-weight:bold; cursor:pointer;">تایید و ورود</button>
-
-    </div>
-
-</div>
-
 
 </html>
 
 """
 
 
+def clean_typing():
 
-# --- سرور پایتون ---
+    while True:
+
+        time.sleep(2)
+
+        now = time.time()
+
+        with LOCKED:
+
+            # حذف کاربرانی که بیش از 3 ثانیه از آخرین سیگنال تایپشان گذشته
+
+            to_del = [u for u, t in TYPING_USERS.items() if now - t > 3]
+
+            for u in to_del: del TYPING_USERS[u]
+
+
+
+threading.Thread(target=clean_typing, daemon=True).start()
+
+
 
 class ChatHandler(http.server.BaseHTTPRequestHandler):
 
@@ -619,112 +664,96 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
             self.send_response(200); self.end_headers()
 
-            if self.client_address[0] in AUTH_IPS:
-
-                self.wfile.write(CHAT_PAGE.encode('utf-8'))
-
-            else:
-
-                self.wfile.write(LOGIN_PAGE.encode('utf-8'))
+            self.wfile.write((CHAT_PAGE if self.client_address[0] in AUTH_IPS else LOGIN_PAGE).encode())
 
         elif u.path == '/get_messages':
 
             p = urllib.parse.parse_qs(u.query)
 
-            since = float(p.get('since', [0])[0])
-
-            current_uid = p.get('u_id', [''])[0]
-
-            
+            since, uid = float(p.get('since', [0])[0]), p.get('u_id', [''])[0]
 
             self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
 
-            
-
             with LOCKED:
 
-                news = [m for m in MESSAGES if m['timestamp'] > since]
+                LAST_SEEN[uid] = time.time()
 
-                # چک کردن اینکه آیا شخص دیگری جز کاربر فعلی در حال تایپ است؟
+                for m in MESSAGES:
 
-                is_typing = any(uid != current_uid for uid in TYPING_USERS.keys())
+                    if m['sender_id'] != uid and not m.get('seen'): 
+
+                        m['seen'] = True; m['updated'] = time.time(); save_all()
 
                 
 
-                response = {
+                news = [m for m in MESSAGES if m['timestamp'] > since or m.get('updated', 0) > since]
 
-                    "messages": news,
+                other_uid = next((k for k in LAST_SEEN if k != uid), None)
 
-                    "is_typing": is_typing
+                other_online = "Offline"
 
-                }
+                if other_uid:
 
-                self.wfile.write(json.dumps(response).encode('utf-8'))
+                    diff = time.time() - LAST_SEEN[other_uid]
+
+                    other_online = "Online" if diff < 10 else (datetime.now() - timedelta(seconds=diff) + timedelta(hours=3, minutes=30)).strftime("%H:%M")
+
+                
+
+                self.wfile.write(json.dumps({"messages": news, "is_typing": any(k != uid for k in TYPING_USERS.keys()), "other_online": other_online}).encode())
 
 
 
     def do_POST(self):
 
-        content_length = int(self.headers['Content-Length'])
+        l = int(self.headers['Content-Length'])
 
-        body = self.rfile.read(content_length).decode('utf-8')
-
-        
+        raw = self.rfile.read(l).decode()
 
         if self.path == '/login':
 
-            if f"p={PASSWORD}" in body:
+            if f"p={PASSWORD}" in raw:
 
                 AUTH_IPS.add(self.client_address[0])
 
                 self.send_response(303); self.send_header('Location', '/'); self.end_headers()
 
-            else:
-
-                self.send_response(200); self.end_headers(); self.wfile.write(b"Password Incorrect")
-
-        
-
-        elif self.path == '/typing':
-
-            d = json.loads(body)
-
-            with LOCKED:
-
-                TYPING_USERS[d['u_id']] = time.time()
-
-            self.send_response(200); self.end_headers()
+            return
 
 
 
-        elif self.path == '/send_message':
 
-            d = json.loads(body)
+        body = json.loads(raw)
 
-            d['timestamp'] = time.time()
+        self.send_response(200); self.end_headers()
 
-            d['time'] = (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M")
+        with LOCKED:
 
+            if self.path == '/send_message':
 
-            with LOCKED:
+                body.update({'id': str(time.time()), 'timestamp': time.time(), 'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"), 'seen': False, 'react': False})
 
-                MESSAGES.append(d)
+                MESSAGES.append(body); save_all()
 
-                if len(MESSAGES) > MAX_MESSAGES: MESSAGES.pop(0)
+            elif self.path == '/delete_message':
 
-                # وقتی پیام فرستاد، وضعیت تایپش رو حذف کن
+                for m in MESSAGES:
 
-                if d['sender_id'] in TYPING_USERS: del TYPING_USERS[d['sender_id']]
+                    if m['id'] == body['id'] and m['sender_id'] == body['u_id']: m['deleted'] = True; m['updated'] = time.time(); save_all(); break
 
-            self.send_response(200); self.end_headers()
+            elif self.path == '/react_message':
+
+                for m in MESSAGES:
+
+                    if m['id'] == body['id']: m['react'] = not m.get('react'); m['updated'] = time.time(); save_all(); break
+
+            elif self.path == '/typing': TYPING_USERS[body['u_id']] = time.time()
 
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
-    daemon_threads = True
-
-    allow_reuse_address = True
+    daemon_threads = True; allow_reuse_address = True
 
 
 
@@ -732,7 +761,4 @@ if __name__ == "__main__":
 
     with ThreadingHTTPServer(("0.0.0.0", PORT), ChatHandler) as httpd:
 
-        print(f"Server started at port {PORT}")
-
-        httpd.serve_forever()
-
+        print(f"Chat Server Running on Port {PORT}..."); httpd.serve_forever()
