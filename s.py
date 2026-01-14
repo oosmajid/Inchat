@@ -106,7 +106,7 @@ LOGIN_PAGE = """
 
 # --- صفحه چت ---
 
-CHAT_PAGE = """
+CHAT_PAGE = r"""
 
 <!DOCTYPE html>
 
@@ -124,7 +124,21 @@ CHAT_PAGE = """
 
         * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
 
-        body { background: #efe7dd; margin: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+        body {
+
+            background: #efe7dd;
+
+            margin: 0;
+
+            height: var(--app-height, 100dvh); /* ارتفاع واقعی بعد از باز شدن کیبورد */
+
+            display: flex;
+
+            flex-direction: column;
+
+            overflow: hidden;
+
+        }
 
         
 
@@ -177,7 +191,59 @@ CHAT_PAGE = """
 
             -webkit-user-select: text;  /* برای آیفون */
 
+
+            -webkit-touch-callout: none; /* iOS menu */
+
+            touch-action: manipulation;
+
+
         }
+
+        /* فقط موبایل: انتخاب متن پیام‌ها غیرفعال */
+
+        @media (hover: none) and (pointer: coarse) {
+
+            .msg{
+
+                user-select: none !important;
+
+                -webkit-user-select: none !important;
+
+            }
+
+        }
+
+
+        #copy-bubble{
+
+            position: fixed;
+
+            top: 50%;
+
+            left: 50%;
+
+            transform: translate(-50%, -50%);
+
+            background: rgba(0,0,0,0.78);
+
+            color: #fff;
+
+            padding: 10px 14px;
+
+            border-radius: 14px;
+
+            font-size: 13px;
+
+            z-index: 20000;
+
+            display: none;
+
+            backdrop-filter: blur(4px);
+
+            -webkit-backdrop-filter: blur(4px);
+
+        }
+
 
 
         .sent { background: white; align-self: flex-start; border-top-left-radius: 4px; }
@@ -216,7 +282,7 @@ CHAT_PAGE = """
 
         /* Input Area Material */
 
-        #input-container { background: #f0f2f5; padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid #d1d7db; }
+        #input-container { background: #f0f2f5; padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid #d1d7db; position: sticky; bottom: 0; z-index: 20; }
 
         
 
@@ -247,7 +313,7 @@ CHAT_PAGE = """
 
             position: fixed;
 
-            bottom: 85px;
+            bottom: var(--bubble-bottom, 85px);
 
             left: 50%;
 
@@ -275,7 +341,13 @@ CHAT_PAGE = """
 
         }
 
-        @keyframes fadeIn { from { opacity: 0; bottom: 70px; } to { opacity: 1; bottom: 85px; } }
+        @keyframes fadeIn {
+
+            from { opacity: 0; bottom: calc(var(--bubble-bottom, 85px) - 15px); }
+
+            to   { opacity: 1; bottom: var(--bubble-bottom, 85px); }
+
+        }
 
 
     </style>
@@ -328,7 +400,9 @@ CHAT_PAGE = """
 
     </div>
 
-    <span onclick="cancelReply()" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
+    
+    <span onpointerdown="event.preventDefault();" onclick="cancelReply(true)" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
+
 
 </div>
 
@@ -336,7 +410,7 @@ CHAT_PAGE = """
 
 <div id="input-container">
 
-    <button class="icon-btn send-btn" onclick="sendTxt()">
+    <button class="icon-btn send-btn" onpointerdown="event.preventDefault();" onclick="sendTxt()">
 
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
 
@@ -358,7 +432,7 @@ CHAT_PAGE = """
 
 </div>
 
-
+<div id="copy-bubble">کپی شد</div>
 
 <script>
 
@@ -372,6 +446,57 @@ CHAT_PAGE = """
 
     let autoScroll = true;
 
+
+
+    function updateAppHeight(){
+
+        const vv = window.visualViewport;
+
+        const h = vv ? vv.height : window.innerHeight;
+
+
+
+        document.documentElement.style.setProperty('--app-height', h + 'px');
+
+
+
+        // فاصله از پایین: ارتفاع input + کمی فاصله + ارتفاع کیبورد (اگر باز باشد)
+
+        const inputH = document.getElementById('input-container')?.offsetHeight || 0;
+
+
+
+        // ارتفاع کیبورد تقریبی: اختلاف innerHeight و visualViewport.height
+
+        const keyboardH = vv ? Math.max(0, window.innerHeight - vv.height - (vv.offsetTop || 0)) : 0;
+
+
+
+        const bottom = keyboardH + inputH + 12;  // 12px فاصله
+
+        document.documentElement.style.setProperty('--bubble-bottom', bottom + 'px');
+
+    }
+
+
+
+    // بار اول
+
+    updateAppHeight();
+
+
+
+    // با تغییر اندازه/باز و بسته شدن کیبورد
+
+    window.addEventListener('resize', updateAppHeight);
+
+    if (window.visualViewport) {
+
+        window.visualViewport.addEventListener('resize', updateAppHeight);
+
+        window.visualViewport.addEventListener('scroll', updateAppHeight); // بعضی موبایل‌ها موقع کیبورد scroll می‌دهند
+
+    }
 
 
 
@@ -441,6 +566,30 @@ CHAT_PAGE = """
     }
 
 
+    let copyBubbleTimer = null;
+
+    function showCopyBubble(){
+
+        const b = document.getElementById('copy-bubble');
+
+        b.style.display = 'block';
+
+        b.style.opacity = '1';
+
+
+
+        if (copyBubbleTimer) clearTimeout(copyBubbleTimer);
+
+        copyBubbleTimer = setTimeout(() => {
+
+            b.style.display = 'none';
+
+        }, 900);
+
+    }
+
+
+
 
     // --- رمزنگاری ---
 
@@ -483,6 +632,13 @@ CHAT_PAGE = """
         try { return decodeURIComponent(escape(rc4(CHAT_KEY, atob(t)))); } catch(e) { return "❌"; } 
 
     }
+
+
+    document.getElementById('msgInput').addEventListener('focus', () => {
+
+        setTimeout(() => scrollToBottom(), 50);
+
+    });
 
 
 
@@ -567,6 +723,19 @@ CHAT_PAGE = """
 
     }
 
+    function linkify(text){
+
+        const esc = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+
+        return esc.replace(/(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi, (m) => {
+
+            const href = m.startsWith('http') ? m : 'https://' + m;
+
+            return `<a href="${href}" target="_blank" rel="noopener noreferrer">${m}</a>`;
+
+        });
+
+    }
 
 
     function render(m) {
@@ -587,6 +756,81 @@ CHAT_PAGE = """
 
         div.ondblclick = () => postAction('/react_message', {id: m.id});
 
+        // --- long press copy (mobile) ---
+
+        let pressTimer = null;
+
+
+
+        function clearPress(){
+
+            if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+
+        }
+
+
+
+
+        div.addEventListener('touchstart', (e) => {
+
+            // روی عکس/لینک کپی نکن
+
+            if (e.target && (e.target.closest('img'))) return;
+
+
+
+            // اگر پیام عکس است، کپی را کلاً فعال نکن
+
+            if (m.type === 'image') return;
+
+
+
+            const txt = dec(m.data);
+
+
+
+            pressTimer = setTimeout(async () => {
+
+                try {
+
+                    if (navigator.clipboard && window.isSecureContext) {
+
+                        await navigator.clipboard.writeText(txt);
+
+                    } else {
+
+                        const ta = document.createElement('textarea');
+
+                        ta.value = txt;
+
+                        document.body.appendChild(ta);
+
+                        ta.select();
+
+                        document.execCommand('copy');
+
+                        ta.remove();
+
+                    }
+
+                    showCopyBubble();
+
+                } catch(_) {}
+
+            }, 1000);
+
+        }, {passive:true});
+
+
+
+
+        div.addEventListener('touchend', clearPress, {passive:true});
+
+        div.addEventListener('touchcancel', clearPress, {passive:true});
+
+        div.addEventListener('touchmove', clearPress, {passive:true});
+
+
         
 
         let content = dec(m.data);
@@ -601,16 +845,22 @@ CHAT_PAGE = """
 
         let actions = `<div class="msg-actions">
 
-            ${m.sender_id === myId ? `<span onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
+            ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
 
-            <span onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").substring(0,100)}')">پاسخ</span>
-
+            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").substring(0,100)}')">پاسخ</span>
 
         </div>`;
 
 
 
-        let body = m.type === 'image' ? `<img src="${content}" style="max-width:100%; border-radius:12px;">` : `<div>${content}</div>`;
+
+        
+        let body = m.type === 'image'
+
+        ? `<img src="${content}" style="max-width:100%; border-radius:12px;">`
+
+        : `<div>${linkify(content)}</div>`;
+
 
         
 
@@ -636,7 +886,16 @@ CHAT_PAGE = """
 
     }
 
-    function cancelReply() { replyingTo = null; document.getElementById('reply-preview').style.display = 'none'; }
+
+    function cancelReply(keepFocus=false) {
+
+        replyingTo = null;
+
+        document.getElementById('reply-preview').style.display = 'none';
+
+        if (keepFocus) document.getElementById('msgInput').focus({preventScroll:true});
+
+    }
 
 
 
