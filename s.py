@@ -850,7 +850,7 @@ def cleanup_data():
 
             # فقط پیام‌هایی که کمتر از ۲۴ ساعت سن دارند را نگه دار
 
-            MESSAGES[:] = [m for m in MESSAGES if now - m['timestamp'] < 7200]
+            MESSAGES[:] = [m for m in MESSAGES if now - m['timestamp'] < 86400]
 
             
 
