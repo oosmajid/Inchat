@@ -374,6 +374,24 @@ CHAT_PAGE = """
 
 
 
+
+    let pollTimer = null;
+
+    function schedulePoll(){
+
+        if (pollTimer) clearInterval(pollTimer);
+
+        // وقتی صفحه فعال است: 2 ثانیه
+
+        // وقتی صفحه در پس‌زمینه/غیرفعال است: 12 ثانیه (یا بیشتر)
+
+        const interval = document.hidden ? 30000 : 2000;
+
+        pollTimer = setInterval(fetchMessages, interval);
+
+    }
+
+
     function startChat() {
 
         let v = document.getElementById('kInp').value;
@@ -384,7 +402,9 @@ CHAT_PAGE = """
 
         document.getElementById('key-overlay').style.display = 'none';
 
-        setInterval(fetchMessages, 2000);
+        schedulePoll();
+
+        document.addEventListener('visibilitychange', schedulePoll);
 
     }
 
@@ -656,7 +676,7 @@ CHAT_PAGE = """
 
         img.onload = async () => {
 
-            const maxW = 1024; // حداکثر عرض
+            const maxW = 720; // حداکثر عرض
 
             const scale = Math.min(1, maxW / img.width);
 
@@ -678,7 +698,7 @@ CHAT_PAGE = """
 
             // کیفیت jpg
 
-            const quality = 0.7;
+            const quality = 0.5;
 
             const dataUrl = canvas.toDataURL('image/jpeg', quality);
 
@@ -755,11 +775,20 @@ CHAT_PAGE = """
 
 
 
-    document.getElementById('msgInput').oninput = (e) => {
+    let lastTypingSent = 0;
+
+        document.getElementById('msgInput').oninput = (e) => {
 
         autoGrow(e.target);
 
-        fetch('/typing', {method:'POST', body: JSON.stringify({u_id: myId})});
+        const now = Date.now();
+
+        if (now - lastTypingSent > 800) { // هر 0.8 ثانیه حداکثر یکبار
+
+            lastTypingSent = now;
+
+            fetch('/typing', {method:'POST', body: JSON.stringify({u_id: myId})});
+        }
 
     };
 
@@ -821,7 +850,7 @@ def cleanup_data():
 
             # فقط پیام‌هایی که کمتر از ۲۴ ساعت سن دارند را نگه دار
 
-            MESSAGES[:] = [m for m in MESSAGES if now - m['timestamp'] < 86400]
+            MESSAGES[:] = [m for m in MESSAGES if now - m['timestamp'] < 7200]
 
             
 
