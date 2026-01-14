@@ -432,7 +432,7 @@ CHAT_PAGE = r"""
 
 </div>
 
-<div id="copy-bubble">کپی شد</div>
+<div id="copy-bubble">✓ کپی شد</div>
 
 <script>
 
@@ -584,7 +584,7 @@ CHAT_PAGE = r"""
 
             b.style.display = 'none';
 
-        }, 900);
+        }, 1200);
 
     }
 
