@@ -642,25 +642,69 @@ CHAT_PAGE = """
 
 
 
-    function sendImg(input) {
+    async function sendImg(input) {
 
-        if(input.files[0]) {
+        const file = input.files[0];
 
-            let r = new FileReader();
+        if (!file) return;
 
-            r.onload = e => postAction('/send_message', {
 
-                type:'image', data: enc(e.target.result), 
 
-                reply_id: replyingTo ? replyingTo.id : null,
+        // Resize + compress
 
-                reply_text: replyingTo ? enc(replyingTo.text) : null
+        const img = new Image();
+
+        img.onload = async () => {
+
+            const maxW = 1024; // حداکثر عرض
+
+            const scale = Math.min(1, maxW / img.width);
+
+            const w = Math.round(img.width * scale);
+
+            const h = Math.round(img.height * scale);
+
+
+
+            const canvas = document.createElement('canvas');
+
+            canvas.width = w; canvas.height = h;
+
+            const ctx = canvas.getContext('2d');
+
+            ctx.drawImage(img, 0, 0, w, h);
+
+
+
+            // کیفیت jpg
+
+            const quality = 0.7;
+
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+
+
+
+            await postAction('/send_message', {
+
+            type: 'image',
+
+            data: enc(dataUrl),
+
+            reply_id: replyingTo ? replyingTo.id : null,
+
+            reply_text: replyingTo ? enc(replyingTo.text) : null
 
             });
 
-            r.readAsDataURL(input.files[0]);
 
-        }
+
+            input.value = "";
+
+        };
+
+
+
+        img.src = URL.createObjectURL(file);
 
     }
 
