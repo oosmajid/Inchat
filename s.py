@@ -1356,6 +1356,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
                         m['deleted'] = True
 
+                        m['data'] = "-"
+
                         m['updated'] = time.time()
 
                         need_save = True
