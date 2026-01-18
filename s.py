@@ -1077,6 +1077,8 @@ CHAT_PAGE = r"""
 
             ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
 
+            ${m.sender_id === myId && m.type !== 'image' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+
             <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").substring(0,100)}')">پاسخ</span>
 
         </div>`;
@@ -1094,7 +1096,8 @@ CHAT_PAGE = r"""
 
         
 
-        div.innerHTML = `${reply} ${body} ${react} <div class="footer-info"><span>${m.time}</span> ${seen}</div> ${actions}`;
+        let editedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
+        div.innerHTML = `${reply} ${body} ${react} <div class="footer-info">${editedIcon}<span>${m.time}</span> ${seen}</div> ${actions}`;
 
         if(!old) box.appendChild(div);
 
@@ -1253,6 +1256,29 @@ CHAT_PAGE = r"""
     }
 
     function deleteMsg(id) { if(confirm("حذف پیام؟")) postAction('/delete_message', {id: id}); }
+
+    function editMsg(id, isEdited) {
+        const msgEl = document.getElementById('msg-' + id);
+        if (!msgEl) return;
+        
+        // پیدا کردن متن پیام از DOM - پیدا کردن div محتوای پیام (نه reply-area یا footer-info)
+        // ساختار: reply-area + body (div یا img) + reaction + footer-info + msg-actions
+        const bodyDiv = msgEl.querySelector('div:not(.reply-area):not(.reaction):not(.footer-info):not(.msg-actions)');
+        if (!bodyDiv) return;
+        
+        // اگر img باشد، نمی‌توانیم ویرایش کنیم (این نباید اتفاق بیفتد چون دکمه ویرایش برای عکس‌ها نیست)
+        if (bodyDiv.tagName === 'IMG') return;
+        
+        // حذف لینک‌ها و HTML برای نمایش در prompt
+        let currentText = bodyDiv.textContent || bodyDiv.innerText;
+        
+        // prompt برای ویرایش
+        const newText = prompt('ویرایش پیام:', currentText);
+        
+        if (newText !== null && newText.trim() !== '' && newText !== currentText) {
+            postAction('/edit_message', {id: id, data: enc(newText.trim())});
+        }
+    }
 
     function scrollToMsg(id) {
 
@@ -1607,6 +1633,28 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                             break
                         
                         m['react'] = not m.get('react')
+
+                        m['updated'] = time.time()
+
+                        need_save = True
+
+                        break
+
+
+
+            elif self.path == '/edit_message':
+
+                for m in MESSAGES:
+
+                    if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
+
+                        # فقط پیام‌های متنی را می‌توان ویرایش کرد (غیر از عکس)
+                        if m.get('type') == 'image':
+                            break
+                        
+                        m['data'] = body['data']
+
+                        m['edited'] = True
 
                         m['updated'] = time.time()
 
