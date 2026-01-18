@@ -507,6 +507,66 @@ CHAT_PAGE = r"""
 
         }
 
+        #scroll-down-btn {
+
+            display: none;
+
+            position: fixed;
+
+            bottom: var(--bubble-bottom, 85px);
+
+            right: 20px;
+
+            background: #00a884;
+
+            color: white;
+
+            border: none;
+
+            border-radius: 50%;
+
+            width: 40px;
+
+            height: 40px;
+
+            cursor: pointer;
+
+            z-index: 1000;
+
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+
+            font-size: 20px;
+
+            transition: opacity 0.3s, transform 0.3s;
+
+            opacity: 0;
+
+            transform: scale(0.8);
+
+        }
+
+        #scroll-down-btn.show {
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            opacity: 1;
+
+            transform: scale(1);
+
+        }
+
+        #scroll-down-btn:hover {
+
+            background: #008069;
+
+            transform: scale(1.1);
+
+        }
+
         a { color: #00a884; }
 
         @keyframes fadeIn {
@@ -585,6 +645,8 @@ CHAT_PAGE = r"""
 </div>
 
 <div id="new-msg-bubble" onclick="scrollToBottom()">پیام جدید 👇</div>
+
+<div id="scroll-down-btn" onclick="scrollToBottom()" title="اسکرول به پایین">⬇</div>
 
 <div id="input-container">
 
@@ -758,6 +820,10 @@ CHAT_PAGE = r"""
 
         document.addEventListener('visibilitychange', schedulePoll);
 
+        // بررسی اولیه وضعیت اسکرول بعد از بارگذاری پیام‌ها
+
+        setTimeout(() => handleScroll(), 500);
+
     }
 
 
@@ -861,11 +927,6 @@ CHAT_PAGE = r"""
     }
 
 
-    document.getElementById('msgInput').addEventListener('focus', () => {
-
-        setTimeout(() => scrollToBottom(), 50);
-
-    });
 
 
 
@@ -943,6 +1004,10 @@ CHAT_PAGE = r"""
                     }
 
                 }
+
+                // بررسی وضعیت اسکرول بعد از رندر پیام‌ها
+
+                setTimeout(() => handleScroll(), 100);
 
             }
 
@@ -1150,6 +1215,10 @@ CHAT_PAGE = r"""
 
         i.value = ''; i.style.height = '40px'; cancelReply();
 
+        // اسکرول خودکار به پایین بعد از ارسال پیام
+
+        setTimeout(() => scrollToBottom(), 100);
+
     }
 
 
@@ -1212,6 +1281,10 @@ CHAT_PAGE = r"""
 
             input.value = "";
 
+            // اسکرول خودکار به پایین بعد از ارسال عکس
+
+            setTimeout(() => scrollToBottom(), 100);
+
         };
 
 
@@ -1232,7 +1305,12 @@ CHAT_PAGE = r"""
 
 
 
-    function scrollToBottom() { const b = document.getElementById('chat-box'); b.scrollTop = b.scrollHeight; }
+    function scrollToBottom() { 
+        const b = document.getElementById('chat-box'); 
+        b.scrollTop = b.scrollHeight; 
+        // به‌روزرسانی وضعیت دکمه اسکرول
+        setTimeout(() => handleScroll(), 100);
+    }
 
 
     function handleScroll() {
@@ -1245,11 +1323,19 @@ CHAT_PAGE = r"""
 
         
 
-        // اگر کاربر به پایین رسید، دکمه را مخفی کن
+        const scrollBtn = document.getElementById('scroll-down-btn');
+
+        // نمایش/مخفی کردن دکمه اسکرول به پایین
 
         if (autoScroll) {
 
             document.getElementById('new-msg-bubble').style.display = 'none';
+
+            scrollBtn.classList.remove('show');
+
+        } else {
+
+            scrollBtn.classList.add('show');
 
         }
 
