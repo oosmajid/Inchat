@@ -64,23 +64,107 @@ LOGIN_PAGE = """
 
 <style>
 
-    body { font-family: 'Tahoma', sans-serif; background: #eceff1; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    :root {
+        --bg-color: #eceff1;
+        --card-bg: white;
+        --text-color: #263238;
+        --input-border: #cfd8dc;
+        --button-bg: #00796b;
+        --button-hover: #004d40;
+    }
 
-    .card { background: white; padding: 40px; border-radius: 28px; text-align: center; width: 340px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+    [data-theme="dark"] {
+        --bg-color: #121212;
+        --card-bg: #1e1e1e;
+        --text-color: #e0e0e0;
+        --input-border: #424242;
+        --button-bg: #00796b;
+        --button-hover: #004d40;
+    }
 
-    h2 { color: #263238; margin-bottom: 20px; }
+    body { 
+        font-family: 'Tahoma', sans-serif; 
+        background: var(--bg-color); 
+        display: flex; 
+        justify-content: center; 
+        align-items: center; 
+        height: 100vh; 
+        margin: 0; 
+        transition: background 0.3s;
+    }
 
-    input { width: 100%; padding: 15px; margin: 15px 0; border-radius: 12px; border: 1px solid #cfd8dc; text-align: center; outline: none; font-size: 16px; }
+    .card { 
+        background: var(--card-bg); 
+        padding: 40px; 
+        border-radius: 28px; 
+        text-align: center; 
+        width: 340px; 
+        box-shadow: 0 10px 25px rgba(0,0,0,0.1); 
+        transition: background 0.3s;
+    }
 
-    button { width: 100%; background: #00796b; color: white; border: none; padding: 15px; border-radius: 12px; cursor: pointer; font-weight: bold; font-size: 16px; transition: 0.3s; }
+    h2 { color: var(--text-color); margin-bottom: 20px; transition: color 0.3s; }
 
-    button:hover { background: #004d40; }
+    input { 
+        width: 100%; 
+        padding: 15px; 
+        margin: 15px 0; 
+        border-radius: 12px; 
+        border: 1px solid var(--input-border); 
+        text-align: center; 
+        outline: none; 
+        font-size: 16px; 
+        background: var(--card-bg);
+        color: var(--text-color);
+        transition: all 0.3s;
+    }
+
+    button { 
+        width: 100%; 
+        background: var(--button-bg); 
+        color: white; 
+        border: none; 
+        padding: 15px; 
+        border-radius: 12px; 
+        cursor: pointer; 
+        font-weight: bold; 
+        font-size: 16px; 
+        transition: 0.3s; 
+    }
+
+    button:hover { background: var(--button-hover); }
+
+    .theme-toggle {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        background: var(--card-bg);
+        border: 1px solid var(--input-border);
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        transition: all 0.3s;
+    }
 
 </style>
+
+<script>
+    const theme = localStorage.getItem('theme') || 'light';
+    if (theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+    }
+</script>
 
 </head>
 
 <body>
+
+    <div class="theme-toggle" onclick="toggleTheme()">🌙</div>
 
     <div class="card">
 
@@ -95,6 +179,20 @@ LOGIN_PAGE = """
         </form>
 
     </div>
+
+    <script>
+        function toggleTheme() {
+            const currentTheme = document.documentElement.getAttribute('data-theme');
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            document.querySelector('.theme-toggle').textContent = newTheme === 'dark' ? '☀️' : '🌙';
+        }
+        
+        // Set initial icon
+        const currentTheme = document.documentElement.getAttribute('data-theme');
+        document.querySelector('.theme-toggle').textContent = currentTheme === 'dark' ? '☀️' : '🌙';
+    </script>
 
 </body>
 
@@ -122,11 +220,51 @@ CHAT_PAGE = r"""
 
     <style>
 
+        :root {
+            --bg-color: #efe7dd;
+            --header-bg: #005c4b;
+            --sent-msg-bg: white;
+            --received-msg-bg: #d9fdd3;
+            --input-bg: #f0f2f5;
+            --input-container-bg: #f0f2f5;
+            --reply-preview-bg: #f0f2f5;
+            --input-border: #d1d7db;
+            --text-color: #000;
+            --secondary-text: #54656f;
+            --msg-actions-color: #00796b;
+            --reaction-bg: white;
+            --highlight-bg: #fff59d;
+            --reply-area-bg: rgba(0,0,0,0.04);
+            --reply-border: #00a884;
+            --icon-fill: #54656f;
+            --send-icon-fill: #00a884;
+        }
+
+        [data-theme="dark"] {
+            --bg-color: #0b141a;
+            --header-bg: #202c33;
+            --sent-msg-bg: #005c4b;
+            --received-msg-bg: #202c33;
+            --input-bg: #2a3942;
+            --input-container-bg: #202c33;
+            --reply-preview-bg: #202c33;
+            --input-border: #2a3942;
+            --text-color: #e9edef;
+            --secondary-text: #8696a0;
+            --msg-actions-color: #00a884;
+            --reaction-bg: #2a3942;
+            --highlight-bg: #547a7a;
+            --reply-area-bg: rgba(255,255,255,0.1);
+            --reply-border: #00a884;
+            --icon-fill: #8696a0;
+            --send-icon-fill: #00a884;
+        }
+
         * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
 
         body {
 
-            background: #efe7dd;
+            background: var(--bg-color);
 
             margin: 0;
 
@@ -138,17 +276,41 @@ CHAT_PAGE = r"""
 
             overflow: hidden;
 
+            transition: background 0.3s;
+
         }
 
         
 
         /* Header Material */
 
-        #header { background: #005c4b; color: white; padding: 12px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10; display: flex; flex-direction: column; align-items: center; }
+        #header { background: var(--header-bg); color: white; padding: 12px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10; display: flex; flex-direction: column; align-items: center; transition: background 0.3s; position: relative; }
 
         #header b { font-size: 18px; }
 
         #status-bar { font-size: 12px; opacity: 0.9; margin-top: 2px; }
+
+        .theme-toggle {
+            position: absolute;
+            left: 20px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255,255,255,0.1);
+            border: none;
+            border-radius: 50%;
+            width: 36px;
+            height: 36px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: all 0.3s;
+        }
+
+        .theme-toggle:hover {
+            background: rgba(255,255,255,0.2);
+        }
 
 
 
@@ -246,47 +408,49 @@ CHAT_PAGE = r"""
 
 
 
-        .sent { background: white; align-self: flex-start; border-top-left-radius: 4px; }
+        .sent { background: var(--sent-msg-bg); color: var(--text-color); align-self: flex-start; border-top-left-radius: 4px; transition: background 0.3s, color 0.3s; }
 
-        .received { background: #d9fdd3; align-self: flex-end; border-top-right-radius: 4px; }
+        .received { background: var(--received-msg-bg); color: var(--text-color); align-self: flex-end; border-top-right-radius: 4px; transition: background 0.3s, color 0.3s; }
 
-        .highlight { background: #fff59d !important; }
+        .highlight { background: var(--highlight-bg) !important; }
 
 
 
         /* Reactions */
 
-        .reaction { position: absolute; bottom: -10px; left: 10px; background: white; border-radius: 10px; padding: 2px 4px; font-size: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+        .reaction { position: absolute; bottom: -10px; left: 10px; background: var(--reaction-bg); border-radius: 10px; padding: 2px 4px; font-size: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: background 0.3s; }
 
 
 
-        .reply-area { background: rgba(0,0,0,0.04); padding: 6px; border-right: 4px solid #00a884; font-size: 11.5px; margin-bottom: 6px; border-radius: 6px; cursor: pointer; color: #54656f; }
+        .reply-area { background: var(--reply-area-bg); padding: 6px; border-right: 4px solid var(--reply-border); font-size: 11.5px; margin-bottom: 6px; border-radius: 6px; cursor: pointer; color: var(--secondary-text); transition: all 0.3s; }
 
         
 
-        .footer-info { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #667781; margin-top: 4px; }
+        .footer-info { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--secondary-text); margin-top: 4px; }
 
         .seen-status { color: #53bdeb; font-weight: bold; margin-right: 4px; }
 
 
 
-        .msg-actions { font-size: 10px; margin-top: 6px; display: flex; gap: 12px; color: #00796b; border-top: 1px solid rgba(0,0,0,0.05); padding-top: 4px; }
+        .msg-actions { font-size: 10px; margin-top: 6px; display: flex; gap: 12px; color: var(--msg-actions-color); border-top: 1px solid rgba(0,0,0,0.05); padding-top: 4px; transition: color 0.3s, border-color 0.3s; }
+        
+        [data-theme="dark"] .msg-actions { border-top-color: rgba(255,255,255,0.1); }
 
         .msg-actions span { cursor: pointer; font-weight: 500; }
 
 
 
-        #typing-status { height: 20px; font-size: 12px; color: #667781; padding: 0 25px; font-style: italic; }
+        #typing-status { height: 20px; font-size: 12px; color: var(--secondary-text); padding: 0 25px; font-style: italic; transition: color 0.3s; }
 
         
 
         /* Input Area Material */
 
-        #input-container { background: #f0f2f5; padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid #d1d7db; position: sticky; bottom: 0; z-index: 20; }
+        #input-container { background: var(--input-container-bg); padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid var(--input-border); position: sticky; bottom: 0; z-index: 20; transition: background 0.3s, border-color 0.3s; }
 
         
 
-        #msgInput { flex: 1; border: none; padding: 10px 15px; border-radius: 20px; outline: none; font-size: 15px; max-height: 120px; min-height: 40px; resize: none; background: white; line-height: 20px; }
+        #msgInput { flex: 1; border: none; padding: 10px 15px; border-radius: 20px; outline: none; font-size: 15px; max-height: 120px; min-height: 40px; resize: none; background: var(--input-bg); color: var(--text-color); line-height: 20px; transition: background 0.3s, color 0.3s; }
 
         
 
@@ -294,17 +458,19 @@ CHAT_PAGE = r"""
 
         .icon-btn:hover { background: rgba(0,0,0,0.05); }
 
-        .icon-btn svg { fill: #54656f; width: 24px; height: 24px; }
+        [data-theme="dark"] .icon-btn:hover { background: rgba(255,255,255,0.1); }
 
-        .send-btn svg { fill: #00a884; }
+        .icon-btn svg { fill: var(--icon-fill); width: 24px; height: 24px; transition: fill 0.3s; }
 
-
-
-        #reply-preview { display: none; background: #f0f2f5; padding: 10px 20px; border-top: 1px solid #d1d7db; justify-content: space-between; align-items: center; }
+        .send-btn svg { fill: var(--send-icon-fill); }
 
 
 
-        #key-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:#005c4b; z-index:10000; display:flex; justify-content:center; align-items:center; }
+        #reply-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; }
+
+
+
+        #key-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:var(--header-bg, #005c4b); z-index:10000; display:flex; justify-content:center; align-items:center; transition: background 0.3s; }
 
 
         #new-msg-bubble {
@@ -341,6 +507,8 @@ CHAT_PAGE = r"""
 
         }
 
+        a { color: #00a884; }
+
         @keyframes fadeIn {
 
             from { opacity: 0; bottom: calc(var(--bubble-bottom, 85px) - 15px); }
@@ -352,6 +520,14 @@ CHAT_PAGE = r"""
 
     </style>
 
+    <script>
+        // بارگذاری تم از localStorage
+        const theme = localStorage.getItem('theme') || 'light';
+        if (theme === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+        }
+    </script>
+
 </head>
 
 <body>
@@ -360,11 +536,11 @@ CHAT_PAGE = r"""
 
 <div id="key-overlay">
 
-    <div style="background:white; padding:35px; border-radius:28px; width:340px; text-align:center; box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+    <div id="key-overlay-card" style="padding:35px; border-radius:28px; width:340px; text-align:center; box-shadow:0 20px 50px rgba(0,0,0,0.3);">
 
-        <h3 style="margin-top:0; color:#263238;">🔐 بازگشایی گفت‌وگو</h3>
+        <h3 id="key-overlay-title" style="margin-top:0;">🔐 بازگشایی گفت‌وگو</h3>
 
-        <input type="password" id="kInp" style="width:100%; padding:15px; margin-bottom:20px; border:1px solid #cfd8dc; border-radius:12px; text-align:center; font-size:18px;" placeholder="کلید محرمانه">
+        <input type="password" id="kInp" style="width:100%; padding:15px; margin-bottom:20px; border-radius:12px; text-align:center; font-size:18px;" placeholder="کلید محرمانه">
 
         <button onclick="startChat()" style="width:100%; background:#00a884; color:white; border:none; padding:15px; border-radius:12px; font-weight:bold; cursor:pointer;">تایید</button>
 
@@ -375,6 +551,8 @@ CHAT_PAGE = r"""
 
 
 <div id="header">
+
+    <button class="theme-toggle" onclick="toggleTheme()" title="تغییر تم">🌙</button>
 
     <b>این‌چت</b>
 
@@ -435,6 +613,55 @@ CHAT_PAGE = r"""
 <div id="copy-bubble">✓ کپی شد</div>
 
 <script>
+
+    // تابع تغییر تم
+    function toggleTheme() {
+        const currentTheme = document.documentElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', newTheme);
+        localStorage.setItem('theme', newTheme);
+        
+        // تغییر آیکون دکمه
+        const themeBtn = document.querySelector('.theme-toggle');
+        if (themeBtn) {
+            themeBtn.textContent = newTheme === 'dark' ? '☀️' : '🌙';
+        }
+        
+        // به‌روزرسانی overlay key
+        updateKeyOverlayTheme(newTheme);
+    }
+    
+    function updateKeyOverlayTheme(theme) {
+        const card = document.getElementById('key-overlay-card');
+        const title = document.getElementById('key-overlay-title');
+        const input = document.getElementById('kInp');
+        
+        if (card && title && input) {
+            const cardBg = getComputedStyle(document.documentElement).getPropertyValue('--card-bg') || (theme === 'dark' ? '#1e1e1e' : 'white');
+            const textColor = getComputedStyle(document.documentElement).getPropertyValue('--text-color') || (theme === 'dark' ? '#e0e0e0' : '#263238');
+            const inputBorder = getComputedStyle(document.documentElement).getPropertyValue('--input-border') || (theme === 'dark' ? '#424242' : '#cfd8dc');
+            const inputBg = getComputedStyle(document.documentElement).getPropertyValue('--input-bg') || (theme === 'dark' ? '#2a3942' : 'white');
+            
+            card.style.background = cardBg.trim() || (theme === 'dark' ? '#1e1e1e' : 'white');
+            card.style.transition = 'background 0.3s';
+            title.style.color = textColor.trim() || (theme === 'dark' ? '#e0e0e0' : '#263238');
+            title.style.transition = 'color 0.3s';
+            input.style.border = `1px solid ${inputBorder.trim() || (theme === 'dark' ? '#424242' : '#cfd8dc')}`;
+            input.style.background = inputBg.trim() || (theme === 'dark' ? '#2a3942' : 'white');
+            input.style.color = textColor.trim() || (theme === 'dark' ? '#e0e0e0' : '#263238');
+            input.style.transition = 'all 0.3s';
+        }
+    }
+    
+    // تنظیم آیکون اولیه
+    document.addEventListener('DOMContentLoaded', function() {
+        const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+        const themeBtn = document.querySelector('.theme-toggle');
+        if (themeBtn) {
+            themeBtn.textContent = currentTheme === 'dark' ? '☀️' : '🌙';
+        }
+        updateKeyOverlayTheme(currentTheme);
+    });
 
     let myId = "ME"; // فقط برای تشخیص سمت کلاینت؛ سرور با کوکی تصمیم می‌گیرد
 
