@@ -468,6 +468,8 @@ CHAT_PAGE = r"""
 
         #reply-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; }
 
+        #edit-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; border-top-color: #ff9800; }
+
 
 
         #key-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:var(--header-bg, #005c4b); z-index:10000; display:flex; justify-content:center; align-items:center; transition: background 0.3s; }
@@ -644,6 +646,22 @@ CHAT_PAGE = r"""
 
 </div>
 
+<div id="edit-preview">
+
+    <div style="border-right: 4px solid #ff9800; padding-right: 10px;">
+
+        <div style="font-size:12px; color:#ff9800; font-weight:bold;">در حال ویرایش:</div>
+
+        <div id="edit-text" style="font-size:13px; color:#54656f;"></div>
+
+    </div>
+
+    
+    <span onpointerdown="event.preventDefault();" onclick="cancelEdit(true)" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
+
+
+</div>
+
 <div id="new-msg-bubble" onclick="scrollToBottom()">پیام جدید 👇</div>
 
 <div id="scroll-down-btn" onclick="scrollToBottom()" title="اسکرول به پایین">⬇</div>
@@ -732,6 +750,8 @@ CHAT_PAGE = r"""
     let lastTime = 0;
 
     let replyingTo = null;
+
+    let editingTo = null;
 
     let autoScroll = true;
 
@@ -1017,9 +1037,14 @@ CHAT_PAGE = r"""
 
     function linkify(text){
 
+        // ابتدا escape کردن HTML برای جلوگیری از XSS
         const esc = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
-        return esc.replace(/(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi, (m) => {
+        // تبدیل خطوط جدید به <br> (بعد از escape)
+        const withBreaks = esc.replace(/\n/g, '<br>');
+
+        // تبدیل لینک‌ها به تگ <a>
+        return withBreaks.replace(/(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi, (m) => {
 
             const href = m.startsWith('http') ? m : 'https://' + m;
 
@@ -1144,7 +1169,7 @@ CHAT_PAGE = r"""
 
             ${m.sender_id === myId && m.type !== 'image' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
 
-            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").substring(0,100)}')">پاسخ</span>
+            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
 
         </div>`;
 
@@ -1172,13 +1197,19 @@ CHAT_PAGE = r"""
 
     function setReply(id, text) {
 
+        // بستن ویرایش اگر باز باشد
+        cancelEdit();
+
         replyingTo = {id: id, text: text};
 
         const rp = document.getElementById('reply-preview');
 
         rp.style.display = 'flex';
 
-        document.getElementById('reply-text').innerText = text.substring(0, 50);
+        // حذف خطوط جدید و فاصله‌های اضافی برای نمایش در یک خط
+        const singleLineText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+        const previewText = singleLineText.length > 50 ? singleLineText.substring(0, 50) + '...' : singleLineText;
+        document.getElementById('reply-text').innerText = previewText;
 
         document.getElementById('msgInput').focus();
 
@@ -1195,6 +1226,24 @@ CHAT_PAGE = r"""
 
     }
 
+    function cancelEdit(keepFocus=false) {
+
+        editingTo = null;
+
+        document.getElementById('edit-preview').style.display = 'none';
+
+        const i = document.getElementById('msgInput');
+
+        i.value = '';
+
+        i.style.height = '40px';
+
+        i.placeholder = 'پیام بنویسید...';
+
+        if (keepFocus) i.focus({preventScroll:true});
+
+    }
+
 
 
     function sendTxt() {
@@ -1203,21 +1252,50 @@ CHAT_PAGE = r"""
 
         if(!i.value.trim()) return;
 
-        postAction('/send_message', {
+        // اگر در حال ویرایش هستیم، پیام را ویرایش کن
+        if (editingTo) {
 
-            type:'text', data: enc(i.value), 
+            postAction('/edit_message', {
 
-            reply_id: replyingTo ? replyingTo.id : null,
+                id: editingTo.id,
 
-            reply_text: replyingTo ? enc(replyingTo.text) : null
+                data: enc(i.value.trim())
 
-        });
+            });
 
-        i.value = ''; i.style.height = '40px'; cancelReply();
+            i.value = ''; 
 
-        // اسکرول خودکار به پایین بعد از ارسال پیام
+            i.style.height = '40px'; 
 
-        setTimeout(() => scrollToBottom(), 100);
+            i.placeholder = 'پیام بنویسید...';
+
+            cancelEdit();
+
+            // هنگام ویرایش، اسکرول نمی‌کنیم
+
+        } else {
+
+            // ارسال پیام جدید
+            postAction('/send_message', {
+
+                type:'text', data: enc(i.value), 
+
+                reply_id: replyingTo ? replyingTo.id : null,
+
+                reply_text: replyingTo ? enc(replyingTo.text) : null
+
+            });
+
+            i.value = ''; 
+
+            i.style.height = '40px'; 
+
+            cancelReply();
+
+            // اسکرول خودکار به پایین فقط بعد از ارسال پیام جدید
+            setTimeout(() => scrollToBottom(), 100);
+
+        }
 
     }
 
@@ -1355,15 +1433,53 @@ CHAT_PAGE = r"""
         // اگر img باشد، نمی‌توانیم ویرایش کنیم (این نباید اتفاق بیفتد چون دکمه ویرایش برای عکس‌ها نیست)
         if (bodyDiv.tagName === 'IMG') return;
         
-        // حذف لینک‌ها و HTML برای نمایش در prompt
-        let currentText = bodyDiv.textContent || bodyDiv.innerText;
-        
-        // prompt برای ویرایش
-        const newText = prompt('ویرایش پیام:', currentText);
-        
-        if (newText !== null && newText.trim() !== '' && newText !== currentText) {
-            postAction('/edit_message', {id: id, data: enc(newText.trim())});
+        // استخراج متن و تبدیل <br> به \n
+        // استفاده از پیمایش مستقیم DOM برای حفظ خطوط جدید
+        function extractTextWithBreaks(node) {
+            let text = '';
+            for (let child of node.childNodes) {
+                if (child.nodeType === Node.TEXT_NODE) {
+                    text += child.textContent;
+                } else if (child.nodeType === Node.ELEMENT_NODE) {
+                    if (child.tagName === 'BR' || child.tagName === 'br') {
+                        text += '\n';
+                    } else if (child.tagName === 'A' || child.tagName === 'a') {
+                        // برای لینک‌ها، فقط متن داخل آن را بگیر
+                        text += extractTextWithBreaks(child);
+                    } else {
+                        text += extractTextWithBreaks(child);
+                    }
+                }
+            }
+            return text;
         }
+        
+        let currentText = extractTextWithBreaks(bodyDiv);
+        
+        // تنظیم حالت ویرایش
+        editingTo = {id: id, originalText: currentText};
+        
+        // نمایش preview ویرایش
+        const ep = document.getElementById('edit-preview');
+        ep.style.display = 'flex';
+        
+        // نمایش متن کوتاه شده در preview (بدون خطوط جدید)
+        // حذف خطوط جدید و فاصله‌های اضافی برای نمایش در یک خط
+        const singleLineText = currentText.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+        const previewText = singleLineText.length > 50 ? singleLineText.substring(0, 50) + '...' : singleLineText;
+        document.getElementById('edit-text').innerText = previewText;
+        
+        // قرار دادن متن در textarea برای ویرایش
+        const i = document.getElementById('msgInput');
+        i.value = currentText;
+        i.placeholder = 'پیام را ویرایش کنید...';
+        autoGrow(i);
+        
+        // بستن reply اگر باز باشد
+        cancelReply();
+        
+        // فوکوس روی textarea
+        i.focus();
     }
 
     function scrollToMsg(id) {
@@ -1393,16 +1509,19 @@ CHAT_PAGE = r"""
 
     };
 
-     // اضافه کردن قابلیت ارسال با Enter
+     // رفتار Enter: Enter ارسال می‌کند، Shift+Enter خط جدید می‌سازد
 
     document.getElementById('msgInput').addEventListener('keydown', function(e) {
 
-        if (e.key === 'Enter' && !e.shiftKey) { // ارسال با اینتر و خط جدید با شیفت+اینتر
-
-            e.preventDefault(); // جلوگیری از ایجاد خط جدید در تکست‌اریا
-
-            sendTxt();
-
+        if (e.key === 'Enter') {
+            if (e.shiftKey) {
+                // Shift+Enter → خط جدید (رفتار پیش‌فرض textarea)
+                return;
+            } else {
+                // Enter بدون Shift → ارسال پیام
+                e.preventDefault();
+                sendTxt();
+            }
         }
 
     });
