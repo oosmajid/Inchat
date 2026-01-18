@@ -981,7 +981,10 @@ CHAT_PAGE = r"""
 
         div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
 
-        div.ondblclick = () => postAction('/react_message', {id: m.id});
+        // فقط پیام‌های طرف مقابل را می‌توان لایک کرد
+        if (m.sender_id !== myId) {
+            div.ondblclick = () => postAction('/react_message', {id: m.id});
+        }
 
         // --- long press copy (mobile) ---
 
@@ -1599,6 +1602,10 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
                     if m['id'] == body['id']:
 
+                        # جلوگیری از لایک کردن پیام خود کاربر
+                        if m['sender_id'] == body['u_id']:
+                            break
+                        
                         m['react'] = not m.get('react')
 
                         m['updated'] = time.time()
