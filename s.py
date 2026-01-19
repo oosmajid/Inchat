@@ -1509,22 +1509,30 @@ CHAT_PAGE = r"""
 
     };
 
-     // رفتار Enter: Enter ارسال می‌کند، Shift+Enter خط جدید می‌سازد
+     // غیرفعال کردن Enter برای ارسال پیام (فقط روی موبایل)
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
-    document.getElementById('msgInput').addEventListener('keydown', function(e) {
-
-        if (e.key === 'Enter') {
-            if (e.shiftKey) {
-                // Shift+Enter → خط جدید (رفتار پیش‌فرض textarea)
-                return;
-            } else {
-                // Enter بدون Shift → ارسال پیام
-                e.preventDefault();
-                sendTxt();
+    if (isMobile) {
+        document.getElementById('msgInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                // روی موبایل اجازه نده Enter پیام را ارسال کند
+                // کاربر باید از دکمه Send استفاده کند
+                return; // رفتار پیش‌فرض textarea (خط جدید)
             }
-        }
-
-    });
+        });
+    } else {
+        // روی دسکتاپ رفتار قبلی
+        document.getElementById('msgInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                    return;
+                } else {
+                    e.preventDefault();
+                    sendTxt();
+                }
+            }
+        });
+    }
 
 
 </script>
