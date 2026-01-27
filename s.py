@@ -420,6 +420,48 @@ CHAT_PAGE = r"""
 
         .reaction { position: absolute; bottom: -10px; left: 10px; background: var(--reaction-bg); border-radius: 10px; padding: 2px 4px; font-size: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: background 0.3s; }
 
+        /* Reaction Menu */
+
+        .reaction-menu {
+            position: fixed;
+            background: var(--reaction-bg);
+            border-radius: 24px;
+            padding: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            display: none;
+            z-index: 10000;
+            gap: 8px;
+            flex-direction: row;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            pointer-events: auto;
+        }
+
+        .reaction-menu.show {
+            display: flex;
+        }
+
+        .reaction-emoji {
+            font-size: 28px;
+            cursor: pointer;
+            padding: 4px;
+            border-radius: 50%;
+            transition: transform 0.2s, background 0.2s;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        .reaction-emoji:hover {
+            transform: scale(1.2);
+            background: rgba(0,0,0,0.1);
+        }
+
+        [data-theme="dark"] .reaction-emoji:hover {
+            background: rgba(255,255,255,0.1);
+        }
+
 
 
         .reply-area { background: var(--reply-area-bg); padding: 6px; border-right: 4px solid var(--reply-border); font-size: 11.5px; margin-bottom: 6px; border-radius: 6px; cursor: pointer; color: var(--secondary-text); transition: all 0.3s; }
@@ -691,6 +733,14 @@ CHAT_PAGE = r"""
 </div>
 
 <div id="copy-bubble">✓ کپی شد</div>
+
+<div id="reaction-menu" class="reaction-menu">
+    <span class="reaction-emoji" onclick="selectReaction('❤️')">❤️</span>
+    <span class="reaction-emoji" onclick="selectReaction('👍')">👍</span>
+    <span class="reaction-emoji" onclick="selectReaction('😂')">😂</span>
+    <span class="reaction-emoji" onclick="selectReaction('😮')">😮</span>
+    <span class="reaction-emoji" onclick="selectReaction('😢')">😢</span>
+</div>
 
 <script>
 
@@ -1071,9 +1121,21 @@ CHAT_PAGE = r"""
 
         div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
 
-        // فقط پیام‌های طرف مقابل را می‌توان لایک کرد
+        // فقط پیام‌های طرف مقابل را می‌توان واکنش داد
+        let longPressHappened = false;
         if (m.sender_id !== myId) {
-            div.ondblclick = () => postAction('/react_message', {id: m.id});
+            div.onclick = (e) => {
+                // جلوگیری از باز شدن منو وقتی روی لینک یا عکس کلیک می‌شود
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions')) {
+                    return;
+                }
+                // اگر long press رخ داده بود، منوی واکنش را نشان نده
+                if (longPressHappened) {
+                    longPressHappened = false;
+                    return;
+                }
+                showReactionMenu(e, m.id);
+            };
         }
 
         // --- long press copy (mobile) ---
@@ -1107,10 +1169,14 @@ CHAT_PAGE = r"""
 
             const txt = dec(m.data);
 
+            longPressHappened = false;
+
 
 
             pressTimer = setTimeout(async () => {
 
+                longPressHappened = true;
+                
                 try {
 
                     if (navigator.clipboard && window.isSecureContext) {
@@ -1144,11 +1210,23 @@ CHAT_PAGE = r"""
 
 
 
-        div.addEventListener('touchend', clearPress, {passive:true});
+        div.addEventListener('touchend', (e) => {
+            clearPress();
+            // اگر long press رخ نداده، بعد از یک تاخیر کوتاه flag را ریست کن
+            if (!longPressHappened) {
+                setTimeout(() => { longPressHappened = false; }, 50);
+            }
+        }, {passive:true});
 
-        div.addEventListener('touchcancel', clearPress, {passive:true});
+        div.addEventListener('touchcancel', (e) => {
+            clearPress();
+            longPressHappened = false;
+        }, {passive:true});
 
-        div.addEventListener('touchmove', clearPress, {passive:true});
+        div.addEventListener('touchmove', (e) => {
+            clearPress();
+            longPressHappened = false;
+        }, {passive:true});
 
 
         
@@ -1157,7 +1235,7 @@ CHAT_PAGE = r"""
 
         let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${dec(m.reply_text)}</div>` : '';
 
-        let react = m.react ? `<div class="reaction">❤️</div>` : '';
+        let react = m.react ? `<div class="reaction">${m.react}</div>` : '';
 
         let seen = (m.sender_id === myId && m.seen) ? '<span class="seen-status">✓✓</span>' : (m.sender_id === myId ? '✓' : '');
 
@@ -1490,6 +1568,92 @@ CHAT_PAGE = r"""
 
     }
 
+    let currentReactingMsgId = null;
+    let reactionMenuCloseHandler = null;
+
+    function showReactionMenu(e, msgId) {
+        const menu = document.getElementById('reaction-menu');
+        currentReactingMsgId = msgId;
+        
+        // بستن منوی قبلی اگر باز باشد
+        if (reactionMenuCloseHandler) {
+            document.removeEventListener('click', reactionMenuCloseHandler);
+            reactionMenuCloseHandler = null;
+        }
+        
+        // محاسبه موقعیت منو (بالای پیام)
+        const msgEl = document.getElementById('msg-' + msgId);
+        if (!msgEl) return;
+        
+        const rect = msgEl.getBoundingClientRect();
+        
+        // نمایش موقت منو برای محاسبه اندازه
+        menu.style.visibility = 'hidden';
+        menu.style.display = 'flex';
+        menu.classList.add('show');
+        
+        const menuRect = menu.getBoundingClientRect();
+        const menuWidth = menuRect.width || 200; // fallback
+        const menuHeight = menuRect.height || 50; // fallback
+        
+        // قرار دادن منو در وسط پیام و کمی بالاتر
+        let left = rect.left + (rect.width / 2) - (menuWidth / 2);
+        let top = rect.top - menuHeight - 10;
+        
+        // اطمینان از اینکه منو از صفحه خارج نشود
+        const padding = 10;
+        if (left < padding) left = padding;
+        if (left + menuWidth > window.innerWidth - padding) {
+            left = window.innerWidth - menuWidth - padding;
+        }
+        if (top < padding) {
+            // اگر جا نیست بالا، زیر پیام قرار بده
+            top = rect.bottom + 10;
+        }
+        
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+        menu.style.visibility = 'visible';
+        
+        // بستن منو با کلیک خارج از آن
+        reactionMenuCloseHandler = (event) => {
+            if (!menu.contains(event.target) && event.target !== msgEl && !msgEl.contains(event.target)) {
+                menu.classList.remove('show');
+                menu.style.display = 'none';
+                document.removeEventListener('click', reactionMenuCloseHandler);
+                document.removeEventListener('touchstart', reactionMenuCloseHandler);
+                reactionMenuCloseHandler = null;
+            }
+        };
+        setTimeout(() => {
+            document.addEventListener('click', reactionMenuCloseHandler);
+            document.addEventListener('touchstart', reactionMenuCloseHandler);
+        }, 10);
+    }
+
+    function selectReaction(emoji) {
+        if (!currentReactingMsgId) return;
+        
+        const menu = document.getElementById('reaction-menu');
+        menu.classList.remove('show');
+        menu.style.display = 'none';
+        
+        // حذف event listener
+        if (reactionMenuCloseHandler) {
+            document.removeEventListener('click', reactionMenuCloseHandler);
+            document.removeEventListener('touchstart', reactionMenuCloseHandler);
+            reactionMenuCloseHandler = null;
+        }
+        
+        // ارسال واکنش به سرور
+        postAction('/react_message', {
+            id: currentReactingMsgId,
+            react: emoji
+        });
+        
+        currentReactingMsgId = null;
+    }
+
 
 
     let lastTypingSent = 0;
@@ -1806,7 +1970,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
             if self.path == '/send_message':
 
-                body.update({'id': str(time.time()), 'timestamp': time.time(), 'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"), 'seen': False, 'react': False})
+                body.update({'id': str(time.time()), 'timestamp': time.time(), 'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"), 'seen': False, 'react': None})
 
                 MESSAGES.append(body)
 
@@ -1841,11 +2005,16 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
                     if m['id'] == body['id']:
 
-                        # جلوگیری از لایک کردن پیام خود کاربر
+                        # جلوگیری از واکنش دادن به پیام خود کاربر
                         if m['sender_id'] == body['u_id']:
                             break
                         
-                        m['react'] = not m.get('react')
+                        # اگر همان ایموجی انتخاب شد، واکنش را حذف کن
+                        react_emoji = body.get('react')
+                        if m.get('react') == react_emoji:
+                            m['react'] = None
+                        else:
+                            m['react'] = react_emoji
 
                         m['updated'] = time.time()
 
