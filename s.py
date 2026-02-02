@@ -1,69 +1,241 @@
-import http.server, socketserver, json, urllib.parse, threading, time, os
-
+import http.server
+import socketserver
+import json
+import urllib.parse
+import threading
+import time
+import os
+import logging
+import sqlite3
+import hashlib
+import base64
 from datetime import datetime, timedelta
+from collections import deque
+from http.cookies import SimpleCookie
+from contextlib import contextmanager
 
-
+# --- تنظیمات لاگینگ ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('chat_server.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --- تنظیمات سرور ---
-
 PORT = 2026
-
+MAX_MESSAGES_IN_MEMORY = 500  # حداکثر تعداد پیام در حافظه
+MESSAGE_EXPIRY_HOURS = 24  # مدت زمان نگهداری پیام‌ها
 
 PASSWORD_TO_USER = {
-
     "9604": "USER_A",
-
     "2728": "USER_B",
-
 }
 
+DB_FILE = "chat_history.db"
 
-DB_FILE = "chat_history.txt"
-
-MESSAGES = [] 
-
+# استفاده از deque برای محدود کردن پیام‌ها در حافظه
+MESSAGES = deque(maxlen=MAX_MESSAGES_IN_MEMORY)
 TYPING_USERS = {}
+LAST_SEEN = {}
 
-LAST_SEEN = {} 
+# استفاده از RLock برای امکان nested locking
+LOCKED = threading.RLock()
 
-LOCKED = threading.Lock()
-
-
-
-# --- مدیریت فایل ---
-
-if os.path.exists(DB_FILE):
-
-    with open(DB_FILE, "r", encoding="utf-8") as f:
-
-        for line in f:
-
-            try: MESSAGES.append(json.loads(line))
-
-            except: pass
+# --- کلید رمزنگاری AES-like (ساده‌شده برای سازگاری با مرورگر) ---
+# نکته: برای امنیت بیشتر باید از Web Crypto API استفاده شود
+ENCRYPTION_SALT = "chat_secure_2024"
 
 
+# --- مدیریت دیتابیس SQLite ---
+def get_db_connection():
+    """ایجاد اتصال به دیتابیس با thread safety"""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def save_all():
 
-    with open(DB_FILE, "w", encoding="utf-8") as f:
+def init_database():
+    """ایجاد جداول دیتابیس"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                sender_id TEXT NOT NULL,
+                type TEXT DEFAULT 'text',
+                data TEXT,
+                timestamp REAL NOT NULL,
+                time TEXT,
+                seen INTEGER DEFAULT 0,
+                react TEXT,
+                reply_id TEXT,
+                reply_text TEXT,
+                deleted INTEGER DEFAULT 0,
+                edited INTEGER DEFAULT 0,
+                updated REAL
+            )
+        ''')
+        
+        # ایجاد ایندکس برای جستجوی سریع‌تر
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_sender ON messages(sender_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_deleted ON messages(deleted)')
+        
+        conn.commit()
+        conn.close()
+        logger.info("دیتابیس با موفقیت آماده شد")
+    except Exception as e:
+        logger.error(f"خطا در ایجاد دیتابیس: {e}")
+        raise
 
-        for m in MESSAGES: f.write(json.dumps(m) + "\n")
 
+def load_messages_to_memory():
+    """بارگذاری پیام‌های اخیر به حافظه"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # فقط پیام‌های غیرحذف‌شده و جدید را بارگذاری کن
+        expiry_time = time.time() - (MESSAGE_EXPIRY_HOURS * 3600)
+        cursor.execute('''
+            SELECT * FROM messages 
+            WHERE deleted = 0 AND timestamp > ? 
+            ORDER BY timestamp DESC 
+            LIMIT ?
+        ''', (expiry_time, MAX_MESSAGES_IN_MEMORY))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # ترتیب را معکوس کن (قدیمی به جدید)
+        for row in reversed(rows):
+            MESSAGES.append(dict(row))
+        
+        logger.info(f"{len(MESSAGES)} پیام به حافظه بارگذاری شد")
+    except Exception as e:
+        logger.error(f"خطا در بارگذاری پیام‌ها: {e}")
+
+
+def save_message_to_db(message):
+    """ذخیره یک پیام در دیتابیس"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO messages 
+            (id, sender_id, type, data, timestamp, time, seen, react, reply_id, reply_text, deleted, edited, updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            message.get('id'),
+            message.get('sender_id'),
+            message.get('type', 'text'),
+            message.get('data'),
+            message.get('timestamp'),
+            message.get('time'),
+            1 if message.get('seen') else 0,
+            message.get('react'),
+            message.get('reply_id'),
+            message.get('reply_text'),
+            1 if message.get('deleted') else 0,
+            1 if message.get('edited') else 0,
+            message.get('updated')
+        ))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"خطا در ذخیره پیام: {e}")
+
+
+def update_message_in_db(message_id, updates):
+    """به‌روزرسانی یک پیام در دیتابیس"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        set_clause = ', '.join([f"{k} = ?" for k in updates.keys()])
+        values = list(updates.values()) + [message_id]
+        
+        cursor.execute(f'''
+            UPDATE messages SET {set_clause} WHERE id = ?
+        ''', values)
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"خطا در به‌روزرسانی پیام: {e}")
+
+
+def cleanup_old_messages():
+    """حذف پیام‌های قدیمی از دیتابیس"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        expiry_time = time.time() - (MESSAGE_EXPIRY_HOURS * 3600)
+        cursor.execute('DELETE FROM messages WHERE timestamp < ?', (expiry_time,))
+        
+        deleted_count = cursor.rowcount
+        conn.commit()
+        conn.close()
+        
+        if deleted_count > 0:
+            logger.info(f"{deleted_count} پیام قدیمی حذف شد")
+    except Exception as e:
+        logger.error(f"خطا در حذف پیام‌های قدیمی: {e}")
+
+
+# --- پارس کوکی بهبود یافته ---
+def parse_cookies(cookie_header: str) -> dict:
+    """پارس کوکی‌ها با استفاده از کتابخانه استاندارد"""
+    cookies = {}
+    if not cookie_header:
+        return cookies
+    
+    try:
+        simple_cookie = SimpleCookie()
+        simple_cookie.load(cookie_header)
+        for key, morsel in simple_cookie.items():
+            cookies[key] = morsel.value
+    except Exception as e:
+        logger.warning(f"خطا در پارس کوکی: {e}")
+        # fallback به روش ساده
+        try:
+            for item in cookie_header.split(';'):
+                if '=' in item:
+                    key, value = item.strip().split('=', 1)
+                    cookies[key] = value
+        except Exception:
+            pass
+    
+    return cookies
+
+
+def parse_json_safely(data: str) -> dict:
+    """پارس JSON با مدیریت خطا"""
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError as e:
+        logger.warning(f"خطا در پارس JSON: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"خطای غیرمنتظره در پارس JSON: {e}")
+        return {}
 
 
 # --- صفحه لاگین ---
-
 LOGIN_PAGE = """
-
 <!DOCTYPE html>
-
 <html lang="fa" dir="rtl">
-
 <head><meta charset="UTF-8"><title>ورود</title>
-
 <style>
-
     :root {
         --bg-color: #eceff1;
         --card-bg: white;
@@ -152,34 +324,22 @@ LOGIN_PAGE = """
     }
 
 </style>
-
 <script>
     const theme = localStorage.getItem('theme') || 'light';
     if (theme === 'dark') {
         document.documentElement.setAttribute('data-theme', 'dark');
     }
 </script>
-
 </head>
-
 <body>
-
     <div class="theme-toggle" onclick="toggleTheme()">🌙</div>
-
     <div class="card">
-
         <h2>ورود به این‌چت</h2>
-
         <form method="POST" action="/login">
-
             <input type="password" name="p" placeholder="رمز عبور" required>
-
             <button type="submit">ورود امن</button>
-
         </form>
-
     </div>
-
     <script>
         function toggleTheme() {
             const currentTheme = document.documentElement.getAttribute('data-theme');
@@ -193,33 +353,19 @@ LOGIN_PAGE = """
         const currentTheme = document.documentElement.getAttribute('data-theme');
         document.querySelector('.theme-toggle').textContent = currentTheme === 'dark' ? '☀️' : '🌙';
     </script>
-
 </body>
-
 </html>
-
 """
 
-
-
 # --- صفحه چت ---
-
 CHAT_PAGE = r"""
-
 <!DOCTYPE html>
-
 <html lang="fa" dir="rtl">
-
 <head>
-
     <meta charset="UTF-8">
-
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-
     <title>این‌چت</title>
-
     <style>
-
         :root {
             --bg-color: #efe7dd;
             --header-bg: #005c4b;
@@ -263,33 +409,19 @@ CHAT_PAGE = r"""
         * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
 
         body {
-
             background: var(--bg-color);
-
             margin: 0;
-
-            height: var(--app-height, 100dvh); /* ارتفاع واقعی بعد از باز شدن کیبورد */
-
+            height: var(--app-height, 100dvh);
             display: flex;
-
             flex-direction: column;
-
             overflow: hidden;
-
             transition: background 0.3s;
-
         }
 
-        
-
         /* Header Material */
-
         #header { background: var(--header-bg); color: white; padding: 12px 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); z-index: 10; display: flex; flex-direction: column; align-items: center; transition: background 0.3s; position: relative; }
-
         #header b { font-size: 18px; }
-
         #status-bar { font-size: 12px; opacity: 0.9; margin-top: 2px; }
-
         .theme-toggle {
             position: absolute;
             left: 20px;
@@ -307,121 +439,63 @@ CHAT_PAGE = r"""
             font-size: 18px;
             transition: all 0.3s;
         }
-
         .theme-toggle:hover {
             background: rgba(255,255,255,0.2);
         }
 
-
-
         /* Chat Area */
-
         #chat-box { flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 8px; scroll-behavior: smooth; }
 
-        
-
         /* Message Bubbles */
-
-        
         .msg { 
-
             max-width: 80%; 
-
             padding: 8px 12px; 
-
             border-radius: 16px; 
-
             font-size: 14.5px; 
-
             position: relative; 
-
             box-shadow: 0 1px 0.5px rgba(0,0,0,0.15); 
-
             transition: all 0.2s; 
-
-            
-
-            /* کدهای جدید برای جلوگیری از بیرون زدن متن */
-
-            word-wrap: break-word;      /* برای مرورگرهای قدیمی */
-
-            overflow-wrap: break-word;  /* استاندارد جدید */
-
-            word-break: break-word;     /* شکستن کلمات طولانی */
-
-            user-select: text;          /* اجازه انتخاب متن */
-
-            -webkit-user-select: text;  /* برای آیفون */
-
-
-            -webkit-touch-callout: none; /* iOS menu */
-
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            word-break: break-word;
+            user-select: text;
+            -webkit-user-select: text;
+            -webkit-touch-callout: none;
             touch-action: manipulation;
-
-
         }
 
         /* فقط موبایل: انتخاب متن پیام‌ها غیرفعال */
-
         @media (hover: none) and (pointer: coarse) {
-
             .msg{
-
                 user-select: none !important;
-
                 -webkit-user-select: none !important;
-
             }
-
         }
-
 
         #copy-bubble{
-
             position: fixed;
-
             top: 50%;
-
             left: 50%;
-
             transform: translate(-50%, -50%);
-
             background: rgba(0,0,0,0.78);
-
             color: #fff;
-
             padding: 10px 14px;
-
             border-radius: 14px;
-
             font-size: 13px;
-
             z-index: 20000;
-
             display: none;
-
             backdrop-filter: blur(4px);
-
             -webkit-backdrop-filter: blur(4px);
-
         }
 
-
-
         .sent { background: var(--sent-msg-bg); color: var(--text-color); align-self: flex-start; border-top-left-radius: 4px; transition: background 0.3s, color 0.3s; }
-
         .received { background: var(--received-msg-bg); color: var(--text-color); align-self: flex-end; border-top-right-radius: 4px; transition: background 0.3s, color 0.3s; }
-
         .highlight { background: var(--highlight-bg) !important; }
 
-
-
         /* Reactions */
-
         .reaction { position: absolute; bottom: -10px; left: 10px; background: var(--reaction-bg); border-radius: 10px; padding: 2px 4px; font-size: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.2); transition: background 0.3s; }
-
+        
         /* Reaction Menu */
-
         .reaction-menu {
             position: fixed;
             background: var(--reaction-bg);
@@ -438,11 +512,9 @@ CHAT_PAGE = r"""
             -webkit-backdrop-filter: blur(10px);
             pointer-events: auto;
         }
-
         .reaction-menu.show {
             display: flex;
         }
-
         .reaction-emoji {
             font-size: 28px;
             cursor: pointer;
@@ -452,178 +524,95 @@ CHAT_PAGE = r"""
             user-select: none;
             -webkit-user-select: none;
         }
-
         .reaction-emoji:hover {
             transform: scale(1.2);
             background: rgba(0,0,0,0.1);
         }
-
         [data-theme="dark"] .reaction-emoji:hover {
             background: rgba(255,255,255,0.1);
         }
 
-
-
         .reply-area { background: var(--reply-area-bg); padding: 6px; border-right: 4px solid var(--reply-border); font-size: 11.5px; margin-bottom: 6px; border-radius: 6px; cursor: pointer; color: var(--secondary-text); transition: all 0.3s; }
 
-        
-
         .footer-info { display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--secondary-text); margin-top: 4px; }
-
         .seen-status { color: #53bdeb; font-weight: bold; margin-right: 4px; }
 
-
-
         .msg-actions { font-size: 10px; margin-top: 6px; display: flex; gap: 12px; color: var(--msg-actions-color); border-top: 1px solid rgba(0,0,0,0.05); padding-top: 4px; transition: color 0.3s, border-color 0.3s; }
-        
         [data-theme="dark"] .msg-actions { border-top-color: rgba(255,255,255,0.1); }
-
         .msg-actions span { cursor: pointer; font-weight: 500; }
-
-
 
         #typing-status { height: 20px; font-size: 12px; color: var(--secondary-text); padding: 0 25px; font-style: italic; transition: color 0.3s; }
 
-        
-
         /* Input Area Material */
-
         #input-container { background: var(--input-container-bg); padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid var(--input-border); position: sticky; bottom: 0; z-index: 20; transition: background 0.3s, border-color 0.3s; }
-
-        
 
         #msgInput { flex: 1; border: none; padding: 10px 15px; border-radius: 20px; outline: none; font-size: 15px; max-height: 120px; min-height: 40px; resize: none; background: var(--input-bg); color: var(--text-color); line-height: 20px; transition: background 0.3s, color 0.3s; }
 
-        
-
         .icon-btn { background: transparent; border: none; cursor: pointer; padding: 8px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
-
         .icon-btn:hover { background: rgba(0,0,0,0.05); }
-
         [data-theme="dark"] .icon-btn:hover { background: rgba(255,255,255,0.1); }
-
         .icon-btn svg { fill: var(--icon-fill); width: 24px; height: 24px; transition: fill 0.3s; }
-
         .send-btn svg { fill: var(--send-icon-fill); }
 
-
-
         #reply-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; }
-
         #edit-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; border-top-color: #ff9800; }
-
-
 
         #key-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background:var(--header-bg, #005c4b); z-index:10000; display:flex; justify-content:center; align-items:center; transition: background 0.3s; }
 
-
         #new-msg-bubble {
-
             display: none;
-
             position: fixed;
-
             bottom: var(--bubble-bottom, 85px);
-
             left: 50%;
-
             transform: translateX(-50%);
-
             background: #00a884;
-
             color: white;
-
             padding: 8px 16px;
-
             border-radius: 20px;
-
             font-size: 13px;
-
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-
             cursor: pointer;
-
             z-index: 1000;
-
             font-weight: bold;
-
             animation: fadeIn 0.3s;
-
         }
-
         #scroll-down-btn {
-
             display: none;
-
             position: fixed;
-
             bottom: var(--bubble-bottom, 85px);
-
             right: 20px;
-
             background: #00a884;
-
             color: white;
-
             border: none;
-
             border-radius: 50%;
-
             width: 40px;
-
             height: 40px;
-
             cursor: pointer;
-
             z-index: 1000;
-
             box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-
             font-size: 20px;
-
             transition: opacity 0.3s, transform 0.3s;
-
             opacity: 0;
-
             transform: scale(0.8);
-
         }
-
         #scroll-down-btn.show {
-
             display: flex;
-
             align-items: center;
-
             justify-content: center;
-
             opacity: 1;
-
             transform: scale(1);
-
         }
-
         #scroll-down-btn:hover {
-
             background: #008069;
-
             transform: scale(1.1);
-
         }
-
         a { color: #00a884; }
-
         @keyframes fadeIn {
-
             from { opacity: 0; bottom: calc(var(--bubble-bottom, 85px) - 15px); }
-
             to   { opacity: 1; bottom: var(--bubble-bottom, 85px); }
-
         }
-
 
     </style>
-
     <script>
         // بارگذاری تم از localStorage
         const theme = localStorage.getItem('theme') || 'light';
@@ -631,109 +620,53 @@ CHAT_PAGE = r"""
             document.documentElement.setAttribute('data-theme', 'dark');
         }
     </script>
-
 </head>
-
 <body>
 
-
-
 <div id="key-overlay">
-
     <div id="key-overlay-card" style="padding:35px; border-radius:28px; width:340px; text-align:center; box-shadow:0 20px 50px rgba(0,0,0,0.3);">
-
         <h3 id="key-overlay-title" style="margin-top:0;">🔐 بازگشایی گفت‌وگو</h3>
-
         <input type="password" id="kInp" style="width:100%; padding:15px; margin-bottom:20px; border-radius:12px; text-align:center; font-size:18px;" placeholder="کلید محرمانه">
-
         <button onclick="startChat()" style="width:100%; background:#00a884; color:white; border:none; padding:15px; border-radius:12px; font-weight:bold; cursor:pointer;">تایید</button>
-
     </div>
-
 </div>
-
-
 
 <div id="header">
-
     <button class="theme-toggle" onclick="toggleTheme()" title="تغییر تم">🌙</button>
-
     <b>این‌چت</b>
-
     <div id="status-bar">درحال اتصال...</div>
-
 </div>
-
-
 
 <div id="chat-box" onscroll="handleScroll()"></div>
-
 <div id="typing-status"></div>
 
-
-
 <div id="reply-preview">
-
     <div style="border-right: 4px solid #00a884; padding-right: 10px;">
-
         <div style="font-size:12px; color:#00a884; font-weight:bold;">پاسخ به:</div>
-
         <div id="reply-text" style="font-size:13px; color:#54656f;"></div>
-
     </div>
-
-    
     <span onpointerdown="event.preventDefault();" onclick="cancelReply(true)" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
-
-
 </div>
-
 <div id="edit-preview">
-
     <div style="border-right: 4px solid #ff9800; padding-right: 10px;">
-
         <div style="font-size:12px; color:#ff9800; font-weight:bold;">در حال ویرایش:</div>
-
         <div id="edit-text" style="font-size:13px; color:#54656f;"></div>
-
     </div>
-
-    
     <span onpointerdown="event.preventDefault();" onclick="cancelEdit(true)" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
-
-
 </div>
-
 <div id="new-msg-bubble" onclick="scrollToBottom()">پیام جدید 👇</div>
-
 <div id="scroll-down-btn" onclick="scrollToBottom()" title="اسکرول به پایین">⬇</div>
-
 <div id="input-container">
-
     <button class="icon-btn send-btn" onpointerdown="event.preventDefault();" onclick="sendTxt()">
-
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-
     </button>
-
-    
-
     <textarea id="msgInput" placeholder="پیام بنویسید..." rows="1" oninput="autoGrow(this)"></textarea>
-
-
-
     <button class="icon-btn" onclick="document.getElementById('fInp').click()">
-
         <svg viewBox="0 0 24 24"><path d="M19 7v2.99s-1.99.01-2 0V7h-3s.01-1.99 0-2h3V2h2v3h3v2h-3zm-3 4V8h-3V5H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8h-3zM5 19l3-4 2 3 3-4 4 5H5z"/></svg>
-
     </button>
-
     <input type="file" id="fInp" hidden accept="image/*" onchange="sendImg(this)">
-
 </div>
-
 <div id="copy-bubble">✓ کپی شد</div>
-
 <div id="reaction-menu" class="reaction-menu">
     <span class="reaction-emoji" onclick="selectReaction('❤️')">❤️</span>
     <span class="reaction-emoji" onclick="selectReaction('👍')">👍</span>
@@ -743,7 +676,6 @@ CHAT_PAGE = r"""
 </div>
 
 <script>
-
     // تابع تغییر تم
     function toggleTheme() {
         const currentTheme = document.documentElement.getAttribute('data-theme');
@@ -793,343 +725,235 @@ CHAT_PAGE = r"""
         updateKeyOverlayTheme(currentTheme);
     });
 
-    let myId = "ME"; // فقط برای تشخیص سمت کلاینت؛ سرور با کوکی تصمیم می‌گیرد
-
+    let myId = "ME";
     let CHAT_KEY = "";
-
     let lastTime = 0;
-
     let replyingTo = null;
-
     let editingTo = null;
-
     let autoScroll = true;
 
-
-
     function updateAppHeight(){
-
         const vv = window.visualViewport;
-
         const h = vv ? vv.height : window.innerHeight;
-
-
-
         document.documentElement.style.setProperty('--app-height', h + 'px');
-
-
-
-        // فاصله از پایین: ارتفاع input + کمی فاصله + ارتفاع کیبورد (اگر باز باشد)
-
         const inputH = document.getElementById('input-container')?.offsetHeight || 0;
-
-
-
-        // ارتفاع کیبورد تقریبی: اختلاف innerHeight و visualViewport.height
-
         const keyboardH = vv ? Math.max(0, window.innerHeight - vv.height - (vv.offsetTop || 0)) : 0;
-
-
-
-        const bottom = keyboardH + inputH + 12;  // 12px فاصله
-
+        const bottom = keyboardH + inputH + 12;
         document.documentElement.style.setProperty('--bubble-bottom', bottom + 'px');
-
     }
-
-
-
-    // بار اول
 
     updateAppHeight();
 
-
-
-    // با تغییر اندازه/باز و بسته شدن کیبورد
-
     window.addEventListener('resize', updateAppHeight);
-
     if (window.visualViewport) {
-
         window.visualViewport.addEventListener('resize', updateAppHeight);
-
-        window.visualViewport.addEventListener('scroll', updateAppHeight); // بعضی موبایل‌ها موقع کیبورد scroll می‌دهند
-
+        window.visualViewport.addEventListener('scroll', updateAppHeight);
     }
-
-
 
     let pollTimer = null;
-
     function schedulePoll(){
-
         if (pollTimer) clearInterval(pollTimer);
-
-        // وقتی صفحه فعال است: 2 ثانیه
-
-        // وقتی صفحه در پس‌زمینه/غیرفعال است: 12 ثانیه (یا بیشتر)
-
         const interval = document.hidden ? 30000 : 2000;
-
         pollTimer = setInterval(fetchMessages, interval);
-
     }
-
 
     function startChat() {
-
         let v = document.getElementById('kInp').value;
-
         if(!v) return;
-
         CHAT_KEY = v;
-
         document.getElementById('key-overlay').style.display = 'none';
-
         schedulePoll();
-
         document.addEventListener('visibilitychange', schedulePoll);
-
-        // بررسی اولیه وضعیت اسکرول بعد از بارگذاری پیام‌ها
-
         setTimeout(() => handleScroll(), 500);
-
     }
-
-
 
     // --- صدای بیپ ---
-
     function playDing() {
-
         try {
-
             const ctx = new (window.AudioContext || window.webkitAudioContext)();
-
             const osc = ctx.createOscillator();
-
             const gain = ctx.createGain();
-
             osc.connect(gain); gain.connect(ctx.destination);
-
             osc.type = 'sine';
-
             osc.frequency.setValueAtTime(580, ctx.currentTime);
-
             gain.gain.setValueAtTime(0, ctx.currentTime);
-
             gain.gain.linearRampToValueAtTime(0.1, ctx.currentTime + 0.01);
-
             gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
-
             osc.start(); osc.stop(ctx.currentTime + 0.5);
-
         } catch(e) {}
-
     }
-
 
     let copyBubbleTimer = null;
-
     function showCopyBubble(){
-
         const b = document.getElementById('copy-bubble');
-
         b.style.display = 'block';
-
         b.style.opacity = '1';
-
-
-
         if (copyBubbleTimer) clearTimeout(copyBubbleTimer);
-
         copyBubbleTimer = setTimeout(() => {
-
             b.style.display = 'none';
-
         }, 1200);
-
     }
 
+    // --- رمزنگاری بهبود یافته با PBKDF2 + AES-like ---
+    async function deriveKey(password) {
+        const encoder = new TextEncoder();
+        const keyMaterial = await crypto.subtle.importKey(
+            'raw',
+            encoder.encode(password),
+            'PBKDF2',
+            false,
+            ['deriveBits', 'deriveKey']
+        );
+        return await crypto.subtle.deriveKey(
+            {
+                name: 'PBKDF2',
+                salt: encoder.encode('chat_secure_salt_2024'),
+                iterations: 100000,
+                hash: 'SHA-256'
+            },
+            keyMaterial,
+            { name: 'AES-GCM', length: 256 },
+            false,
+            ['encrypt', 'decrypt']
+        );
+    }
 
+    let cryptoKey = null;
+    
+    async function initCrypto() {
+        if (CHAT_KEY && !cryptoKey) {
+            try {
+                cryptoKey = await deriveKey(CHAT_KEY);
+            } catch(e) {
+                console.warn('Web Crypto not available, falling back to RC4');
+            }
+        }
+    }
 
-
-    // --- رمزنگاری ---
-
+    // RC4 fallback برای مرورگرهای قدیمی
     function rc4(key, str) {
-
         var s = [], j = 0, x, res = '';
-
         for (var i = 0; i < 256; i++) s[i] = i;
-
         for (i = 0; i < 256; i++) {
-
             j = (j + s[i] + key.charCodeAt(i % key.length)) % 256;
-
             x = s[i]; s[i] = s[j]; s[j] = x;
-
         }
-
         i = 0; j = 0;
-
         for (var y = 0; y < str.length; y++) {
-
             i = (i + 1) % 256; j = (j + s[i]) % 256;
-
             x = s[i]; s[i] = s[j]; s[j] = x;
-
             res += String.fromCharCode(str.charCodeAt(y) ^ s[(s[i] + s[j]) % 256]);
-
         }
-
         return res;
-
     }
 
-    function enc(t) { return btoa(rc4(CHAT_KEY, unescape(encodeURIComponent(t)))); }
+    async function enc(t) {
+        if (cryptoKey && window.crypto && window.crypto.subtle) {
+            try {
+                const encoder = new TextEncoder();
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const encrypted = await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv: iv },
+                    cryptoKey,
+                    encoder.encode(t)
+                );
+                const combined = new Uint8Array(iv.length + encrypted.byteLength);
+                combined.set(iv);
+                combined.set(new Uint8Array(encrypted), iv.length);
+                return 'AES:' + btoa(String.fromCharCode(...combined));
+            } catch(e) {
+                console.warn('AES encryption failed, using RC4');
+            }
+        }
+        return btoa(rc4(CHAT_KEY, unescape(encodeURIComponent(t))));
+    }
 
-    function dec(t) { 
-
+    async function dec(t) {
         if(!t) return "";
-
-        try { return decodeURIComponent(escape(rc4(CHAT_KEY, atob(t)))); } catch(e) { return "❌"; } 
-
+        try {
+            if (t.startsWith('AES:') && cryptoKey && window.crypto && window.crypto.subtle) {
+                const data = Uint8Array.from(atob(t.slice(4)), c => c.charCodeAt(0));
+                const iv = data.slice(0, 12);
+                const encrypted = data.slice(12);
+                const decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv: iv },
+                    cryptoKey,
+                    encrypted
+                );
+                return new TextDecoder().decode(decrypted);
+            }
+            return decodeURIComponent(escape(rc4(CHAT_KEY, atob(t))));
+        } catch(e) {
+            return "❌";
+        }
     }
-
-
-
-
 
     function autoGrow(el) {
-
         el.style.height = '40px';
-
         el.style.height = (el.scrollHeight) + 'px';
-
     }
 
-
-
     async function fetchMessages() {
-
         try {
-
+            await initCrypto();
             const res = await fetch(`/get_messages?since=${lastTime}`);
-
-
             const d = await res.json();
-
             myId = d.me;
-
             const sb = document.getElementById('status-bar');
-
             sb.innerHTML = d.other_online === "Online" ? '<b style="color:#1df0bc">● آنلاین</b>' : "آخرین بازدید: " + d.other_online;
-
-
-
             document.getElementById('typing-status').innerText = d.is_typing ? "طرف مقابل در حال نوشتن..." : "";
-
             
-
             if(d.messages.length > 0) {
-
                 let hasNew = false;
-
-                 d.messages.forEach(m => {
-
+                for (const m of d.messages) {
                     if(m.timestamp > lastTime || m.updated) {
-
-                        // اگر پیام جدید از طرف مقابل بود، بلافاصله متن تایپ را پاک کن
-
                         if(m.timestamp > lastTime && m.sender_id !== myId) {
-
                             playDing();
-
-                            document.getElementById('typing-status').innerText = ""; 
-
+                            document.getElementById('typing-status').innerText = "";
                         }
-
-                        render(m);
-
+                        await render(m);
                         if(m.timestamp > lastTime) { lastTime = m.timestamp; hasNew = true; }
-
                     }
-
-                });
-
-
-
-                if(hasNew) {
-
-                    if(autoScroll) {
-
-                        scrollToBottom();
-
-                    } else {
-
-                        // اگر کاربر بالا بود، دکمه "پیام جدید" را نشان بده
-
-                        document.getElementById('new-msg-bubble').style.display = 'block';
-
-                    }
-
                 }
-
-                // بررسی وضعیت اسکرول بعد از رندر پیام‌ها
-
+                if(hasNew) {
+                    if(autoScroll) {
+                        scrollToBottom();
+                    } else {
+                        document.getElementById('new-msg-bubble').style.display = 'block';
+                    }
+                }
                 setTimeout(() => handleScroll(), 100);
-
             }
-
-        } catch(e) {}
-
+        } catch(e) {
+            console.error('Fetch error:', e);
+        }
     }
 
     function linkify(text){
-
-        // ابتدا escape کردن HTML برای جلوگیری از XSS
         const esc = text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-
-        // تبدیل خطوط جدید به <br> (بعد از escape)
         const withBreaks = esc.replace(/\n/g, '<br>');
-
-        // تبدیل لینک‌ها به تگ <a>
         return withBreaks.replace(/(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi, (m) => {
-
             const href = m.startsWith('http') ? m : 'https://' + m;
-
             return `<a href="${href}" target="_blank" rel="noopener noreferrer">${m}</a>`;
-
         });
-
     }
 
-
-    function render(m) {
-
+    async function render(m) {
         const box = document.getElementById('chat-box');
-
         let old = document.getElementById('msg-' + m.id);
-
         if(m.deleted) { if(old) old.remove(); return; }
 
-
-
         const div = old || document.createElement('div');
-
         div.id = 'msg-' + m.id;
-
         div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
-
-        // فقط پیام‌های طرف مقابل را می‌توان واکنش داد
+        
         let longPressHappened = false;
         if (m.sender_id !== myId) {
             div.onclick = (e) => {
-                // جلوگیری از باز شدن منو وقتی روی لینک یا عکس کلیک می‌شود
-                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions')) {
+                // جلوگیری از باز شدن منو روی لینک، عکس، اکشن‌ها یا reply-area
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area')) {
                     return;
                 }
-                // اگر long press رخ داده بود، منوی واکنش را نشان نده
                 if (longPressHappened) {
                     longPressHappened = false;
                     return;
@@ -1138,81 +962,37 @@ CHAT_PAGE = r"""
             };
         }
 
-        // --- long press copy (mobile) ---
-
         let pressTimer = null;
-
-
-
         function clearPress(){
-
             if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
-
         }
 
-
-
-
+        const decryptedData = await dec(m.data);
+        
         div.addEventListener('touchstart', (e) => {
-
-            // روی عکس/لینک کپی نکن
-
             if (e.target && (e.target.closest('img'))) return;
-
-
-
-            // اگر پیام عکس است، کپی را کلاً فعال نکن
-
             if (m.type === 'image') return;
-
-
-
-            const txt = dec(m.data);
-
             longPressHappened = false;
-
-
-
             pressTimer = setTimeout(async () => {
-
                 longPressHappened = true;
-                
                 try {
-
                     if (navigator.clipboard && window.isSecureContext) {
-
-                        await navigator.clipboard.writeText(txt);
-
+                        await navigator.clipboard.writeText(decryptedData);
                     } else {
-
                         const ta = document.createElement('textarea');
-
-                        ta.value = txt;
-
+                        ta.value = decryptedData;
                         document.body.appendChild(ta);
-
                         ta.select();
-
                         document.execCommand('copy');
-
                         ta.remove();
-
                     }
-
                     showCopyBubble();
-
                 } catch(_) {}
-
             }, 1000);
-
         }, {passive:true});
-
-
-
 
         div.addEventListener('touchend', (e) => {
             clearPress();
-            // اگر long press رخ نداده، بعد از یک تاخیر کوتاه flag را ریست کن
             if (!longPressHappened) {
                 setTimeout(() => { longPressHappened = false; }, 50);
             }
@@ -1228,291 +1008,157 @@ CHAT_PAGE = r"""
             longPressHappened = false;
         }, {passive:true});
 
-
-        
-
-        let content = dec(m.data);
-
-        let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${dec(m.reply_text)}</div>` : '';
-
+        let content = decryptedData;
+        let replyText = m.reply_text ? await dec(m.reply_text) : '';
+        let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${replyText}</div>` : '';
         let react = m.react ? `<div class="reaction">${m.react}</div>` : '';
-
         let seen = (m.sender_id === myId && m.seen) ? '<span class="seen-status">✓✓</span>' : (m.sender_id === myId ? '✓' : '');
-
         
-
         let actions = `<div class="msg-actions">
-
             ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
-
             ${m.sender_id === myId && m.type !== 'image' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
-
             <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
-
         </div>`;
 
-
-
-
-        
         let body = m.type === 'image'
-
         ? `<img src="${content}" style="max-width:100%; border-radius:12px;">`
-
         : `<div>${linkify(content)}</div>`;
-
-
-        
 
         let editedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
         div.innerHTML = `${reply} ${body} ${react} <div class="footer-info">${editedIcon}<span>${m.time}</span> ${seen}</div> ${actions}`;
-
         if(!old) box.appendChild(div);
-
     }
 
-
-
     function setReply(id, text) {
-
-        // بستن ویرایش اگر باز باشد
         cancelEdit();
-
         replyingTo = {id: id, text: text};
-
         const rp = document.getElementById('reply-preview');
-
         rp.style.display = 'flex';
-
-        // حذف خطوط جدید و فاصله‌های اضافی برای نمایش در یک خط
         const singleLineText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
         const previewText = singleLineText.length > 50 ? singleLineText.substring(0, 50) + '...' : singleLineText;
         document.getElementById('reply-text').innerText = previewText;
-
         document.getElementById('msgInput').focus();
-
     }
 
-
     function cancelReply(keepFocus=false) {
-
         replyingTo = null;
-
         document.getElementById('reply-preview').style.display = 'none';
-
         if (keepFocus) document.getElementById('msgInput').focus({preventScroll:true});
-
     }
 
     function cancelEdit(keepFocus=false) {
-
         editingTo = null;
-
         document.getElementById('edit-preview').style.display = 'none';
-
         const i = document.getElementById('msgInput');
-
         i.value = '';
-
         i.style.height = '40px';
-
         i.placeholder = 'پیام بنویسید...';
-
         if (keepFocus) i.focus({preventScroll:true});
-
     }
 
-
-
-    function sendTxt() {
-
+    async function sendTxt() {
         let i = document.getElementById('msgInput');
-
         if(!i.value.trim()) return;
-
-        // اگر در حال ویرایش هستیم، پیام را ویرایش کن
+        
         if (editingTo) {
-
+            const encData = await enc(i.value.trim());
             postAction('/edit_message', {
-
                 id: editingTo.id,
-
-                data: enc(i.value.trim())
-
+                data: encData
             });
-
-            i.value = ''; 
-
-            i.style.height = '40px'; 
-
+            i.value = '';
+            i.style.height = '40px';
             i.placeholder = 'پیام بنویسید...';
-
             cancelEdit();
-
-            // هنگام ویرایش، اسکرول نمی‌کنیم
-
         } else {
-
-            // ارسال پیام جدید
+            const encData = await enc(i.value);
+            const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
             postAction('/send_message', {
-
-                type:'text', data: enc(i.value), 
-
+                type:'text', data: encData,
                 reply_id: replyingTo ? replyingTo.id : null,
-
-                reply_text: replyingTo ? enc(replyingTo.text) : null
-
+                reply_text: encReplyText
             });
-
-            i.value = ''; 
-
-            i.style.height = '40px'; 
-
+            i.value = '';
+            i.style.height = '40px';
             cancelReply();
-
-            // اسکرول خودکار به پایین فقط بعد از ارسال پیام جدید
             setTimeout(() => scrollToBottom(), 100);
-
         }
-
     }
-
-
 
     async function sendImg(input) {
-
         const file = input.files[0];
-
         if (!file) return;
 
-
-
-        // Resize + compress
-
         const img = new Image();
-
         img.onload = async () => {
-
-            const maxW = 720; // حداکثر عرض
-
+            const maxW = 720;
             const scale = Math.min(1, maxW / img.width);
-
             const w = Math.round(img.width * scale);
-
             const h = Math.round(img.height * scale);
 
-
-
             const canvas = document.createElement('canvas');
-
             canvas.width = w; canvas.height = h;
-
             const ctx = canvas.getContext('2d');
-
             ctx.drawImage(img, 0, 0, w, h);
 
-
-
-            // کیفیت jpg
-
             const quality = 0.5;
-
             const dataUrl = canvas.toDataURL('image/jpeg', quality);
 
-
-
+            const encData = await enc(dataUrl);
+            const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
+            
             await postAction('/send_message', {
-
-            type: 'image',
-
-            data: enc(dataUrl),
-
-            reply_id: replyingTo ? replyingTo.id : null,
-
-            reply_text: replyingTo ? enc(replyingTo.text) : null
-
+                type: 'image',
+                data: encData,
+                reply_id: replyingTo ? replyingTo.id : null,
+                reply_text: encReplyText
             });
 
-
-
             input.value = "";
-
-            // اسکرول خودکار به پایین بعد از ارسال عکس
-
             setTimeout(() => scrollToBottom(), 100);
-
         };
 
-
-
         img.src = URL.createObjectURL(file);
-
     }
-
-
 
     async function postAction(path, p) {
-
-        await fetch(path, {method:'POST', body: JSON.stringify({...p})});
-
-        fetchMessages();
-
+        try {
+            await fetch(path, {method:'POST', body: JSON.stringify({...p})});
+            fetchMessages();
+        } catch(e) {
+            console.error('Post error:', e);
+        }
     }
 
-
-
-    function scrollToBottom() { 
-        const b = document.getElementById('chat-box'); 
-        b.scrollTop = b.scrollHeight; 
-        // به‌روزرسانی وضعیت دکمه اسکرول
+    function scrollToBottom() {
+        const b = document.getElementById('chat-box');
+        b.scrollTop = b.scrollHeight;
         setTimeout(() => handleScroll(), 100);
     }
 
-
     function handleScroll() {
-
         const b = document.getElementById('chat-box');
-
-        // تشخیص اینکه کاربر در انتهای صفحه است یا نه
-
         autoScroll = (b.scrollHeight - b.scrollTop - b.clientHeight < 100);
-
-        
-
         const scrollBtn = document.getElementById('scroll-down-btn');
-
-        // نمایش/مخفی کردن دکمه اسکرول به پایین
-
         if (autoScroll) {
-
             document.getElementById('new-msg-bubble').style.display = 'none';
-
             scrollBtn.classList.remove('show');
-
         } else {
-
             scrollBtn.classList.add('show');
-
         }
-
     }
 
     function deleteMsg(id) { if(confirm("حذف پیام؟")) postAction('/delete_message', {id: id}); }
-
+    
     function editMsg(id, isEdited) {
         const msgEl = document.getElementById('msg-' + id);
         if (!msgEl) return;
         
-        // پیدا کردن متن پیام از DOM - پیدا کردن div محتوای پیام (نه reply-area یا footer-info)
-        // ساختار: reply-area + body (div یا img) + reaction + footer-info + msg-actions
         const bodyDiv = msgEl.querySelector('div:not(.reply-area):not(.reaction):not(.footer-info):not(.msg-actions)');
         if (!bodyDiv) return;
         
-        // اگر img باشد، نمی‌توانیم ویرایش کنیم (این نباید اتفاق بیفتد چون دکمه ویرایش برای عکس‌ها نیست)
         if (bodyDiv.tagName === 'IMG') return;
         
-        // استخراج متن و تبدیل <br> به \n
-        // استفاده از پیمایش مستقیم DOM برای حفظ خطوط جدید
         function extractTextWithBreaks(node) {
             let text = '';
             for (let child of node.childNodes) {
@@ -1522,7 +1168,6 @@ CHAT_PAGE = r"""
                     if (child.tagName === 'BR' || child.tagName === 'br') {
                         text += '\n';
                     } else if (child.tagName === 'A' || child.tagName === 'a') {
-                        // برای لینک‌ها، فقط متن داخل آن را بگیر
                         text += extractTextWithBreaks(child);
                     } else {
                         text += extractTextWithBreaks(child);
@@ -1534,38 +1179,27 @@ CHAT_PAGE = r"""
         
         let currentText = extractTextWithBreaks(bodyDiv);
         
-        // تنظیم حالت ویرایش
         editingTo = {id: id, originalText: currentText};
         
-        // نمایش preview ویرایش
         const ep = document.getElementById('edit-preview');
         ep.style.display = 'flex';
         
-        // نمایش متن کوتاه شده در preview (بدون خطوط جدید)
-        // حذف خطوط جدید و فاصله‌های اضافی برای نمایش در یک خط
         const singleLineText = currentText.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
         const previewText = singleLineText.length > 50 ? singleLineText.substring(0, 50) + '...' : singleLineText;
         document.getElementById('edit-text').innerText = previewText;
         
-        // قرار دادن متن در textarea برای ویرایش
         const i = document.getElementById('msgInput');
         i.value = currentText;
         i.placeholder = 'پیام را ویرایش کنید...';
         autoGrow(i);
         
-        // بستن reply اگر باز باشد
         cancelReply();
-        
-        // فوکوس روی textarea
         i.focus();
     }
 
     function scrollToMsg(id) {
-
         const el = document.getElementById('msg-' + id);
-
         if(el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('highlight'); setTimeout(()=>el.classList.remove('highlight'), 1500); }
-
     }
 
     let currentReactingMsgId = null;
@@ -1575,39 +1209,33 @@ CHAT_PAGE = r"""
         const menu = document.getElementById('reaction-menu');
         currentReactingMsgId = msgId;
         
-        // بستن منوی قبلی اگر باز باشد
         if (reactionMenuCloseHandler) {
             document.removeEventListener('click', reactionMenuCloseHandler);
             reactionMenuCloseHandler = null;
         }
         
-        // محاسبه موقعیت منو (بالای پیام)
         const msgEl = document.getElementById('msg-' + msgId);
         if (!msgEl) return;
         
         const rect = msgEl.getBoundingClientRect();
         
-        // نمایش موقت منو برای محاسبه اندازه
         menu.style.visibility = 'hidden';
         menu.style.display = 'flex';
         menu.classList.add('show');
         
         const menuRect = menu.getBoundingClientRect();
-        const menuWidth = menuRect.width || 200; // fallback
-        const menuHeight = menuRect.height || 50; // fallback
+        const menuWidth = menuRect.width || 200;
+        const menuHeight = menuRect.height || 50;
         
-        // قرار دادن منو در وسط پیام و کمی بالاتر
         let left = rect.left + (rect.width / 2) - (menuWidth / 2);
         let top = rect.top - menuHeight - 10;
         
-        // اطمینان از اینکه منو از صفحه خارج نشود
         const padding = 10;
         if (left < padding) left = padding;
         if (left + menuWidth > window.innerWidth - padding) {
             left = window.innerWidth - menuWidth - padding;
         }
         if (top < padding) {
-            // اگر جا نیست بالا، زیر پیام قرار بده
             top = rect.bottom + 10;
         }
         
@@ -1615,7 +1243,6 @@ CHAT_PAGE = r"""
         menu.style.top = top + 'px';
         menu.style.visibility = 'visible';
         
-        // بستن منو با کلیک خارج از آن
         reactionMenuCloseHandler = (event) => {
             if (!menu.contains(event.target) && event.target !== msgEl && !msgEl.contains(event.target)) {
                 menu.classList.remove('show');
@@ -1638,14 +1265,12 @@ CHAT_PAGE = r"""
         menu.classList.remove('show');
         menu.style.display = 'none';
         
-        // حذف event listener
         if (reactionMenuCloseHandler) {
             document.removeEventListener('click', reactionMenuCloseHandler);
             document.removeEventListener('touchstart', reactionMenuCloseHandler);
             reactionMenuCloseHandler = null;
         }
         
-        // ارسال واکنش به سرور
         postAction('/react_message', {
             id: currentReactingMsgId,
             react: emoji
@@ -1654,38 +1279,25 @@ CHAT_PAGE = r"""
         currentReactingMsgId = null;
     }
 
-
-
     let lastTypingSent = 0;
-
-        document.getElementById('msgInput').oninput = (e) => {
-
+    document.getElementById('msgInput').oninput = (e) => {
         autoGrow(e.target);
-
         const now = Date.now();
-
-        if (now - lastTypingSent > 800) { // هر 0.8 ثانیه حداکثر یکبار
-
+        if (now - lastTypingSent > 800) {
             lastTypingSent = now;
-
             fetch('/typing', {method:'POST', body: JSON.stringify({u_id: myId})});
         }
-
     };
 
-     // غیرفعال کردن Enter برای ارسال پیام (فقط روی موبایل)
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
     if (isMobile) {
         document.getElementById('msgInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
-                // روی موبایل اجازه نده Enter پیام را ارسال کند
-                // کاربر باید از دکمه Send استفاده کند
-                return; // رفتار پیش‌فرض textarea (خط جدید)
+                return;
             }
         });
     } else {
-        // روی دسکتاپ رفتار قبلی
         document.getElementById('msgInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
                 if (e.shiftKey) {
@@ -1698,381 +1310,296 @@ CHAT_PAGE = r"""
         });
     }
 
-
 </script>
-
 </body>
-
 </html>
-
 """
 
 
+# --- Thread های پاک‌سازی ---
 def clean_typing():
-
+    """پاک‌سازی وضعیت تایپ کاربران"""
     while True:
-
         time.sleep(2)
-
         now = time.time()
-
         with LOCKED:
-
-            # حذف کاربرانی که بیش از 3 ثانیه از آخرین سیگنال تایپشان گذشته
-
             to_del = [u for u, t in TYPING_USERS.items() if now - t > 3]
-
-            for u in to_del: del TYPING_USERS[u]
+            for u in to_del:
+                del TYPING_USERS[u]
 
 
 def cleanup_data():
-
+    """پاک‌سازی دوره‌ای پیام‌های قدیمی"""
     while True:
-
-        time.sleep(60) # هر یک دقیقه چک کن
-
-        now = time.time()
-        need_save = False
-        with LOCKED:
+        time.sleep(300)  # هر 5 دقیقه
+        try:
+            cleanup_old_messages()
             
-
-            # حذف پیام‌های قدیمی‌تر از ۲۴ ساعت (۸۶۴۰۰ ثانیه)
-
-            original_count = len(MESSAGES)
-
-            # فقط پیام‌هایی که کمتر از ۲۴ ساعت سن دارند را نگه دار
-
-            MESSAGES[:] = [m for m in MESSAGES if now - m['timestamp'] < 86400]
-
-            
-
-            # اگر پیامی حذف شد، فایل را بازنویسی کن
-
-            if len(MESSAGES) != original_count:
-
-                need_save = True
-        
-        if need_save:
-
-            save_all()
-
-def append_one(m):
-
-    with open(DB_FILE, "a", encoding="utf-8") as f:
-
-        f.write(json.dumps(m) + "\n")
+            # بازسازی حافظه
+            with LOCKED:
+                MESSAGES.clear()
+            load_messages_to_memory()
+        except Exception as e:
+            logger.error(f"خطا در پاک‌سازی دوره‌ای: {e}")
 
 
-
-
-
-threading.Thread(target=clean_typing, daemon=True).start()
-threading.Thread(target=cleanup_data, daemon=True).start()
-
-
-def parse_cookies(cookie_header: str):
-
-    out = {}
-
-    if not cookie_header:
-
-        return out
-
-    parts = cookie_header.split(";")
-
-    for p in parts:
-
-        if "=" in p:
-
-            k, v = p.strip().split("=", 1)
-
-            out[k] = v
-
-    return out
-
-
-
+# --- Handler درخواست‌ها ---
 class ChatHandler(http.server.BaseHTTPRequestHandler):
+    
+    def log_message(self, format, *args):
+        """سفارشی‌سازی لاگ درخواست‌ها"""
+        logger.debug(f"{self.address_string()} - {format % args}")
+
+    def send_json_response(self, data, status=200):
+        """ارسال پاسخ JSON"""
+        self.send_response(status)
+        self.send_header('Content-type', 'application/json; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
+
+    def send_html_response(self, html, status=200):
+        """ارسال پاسخ HTML"""
+        self.send_response(status)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(html.encode('utf-8'))
+
+    def get_user_from_cookie(self):
+        """دریافت شناسه کاربر از کوکی"""
+        cookies = parse_cookies(self.headers.get("Cookie", ""))
+        return cookies.get("chat_user")
 
     def do_GET(self):
-
-        u = urllib.parse.urlparse(self.path)
-
-        
-        if u.path == '/':
-
-            cookies = parse_cookies(self.headers.get("Cookie", ""))
-
-            user_id = cookies.get("chat_user")
-
-
-
-            self.send_response(200)
-
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-
-            self.end_headers()
-
-
-
-            self.wfile.write((CHAT_PAGE if user_id in ("USER_A", "USER_B") else LOGIN_PAGE).encode("utf-8"))
-
-
-        elif u.path == '/get_messages':
-
-            p = urllib.parse.parse_qs(u.query)
-
+        try:
+            u = urllib.parse.urlparse(self.path)
             
-            since = float(p.get('since', [0])[0])
+            if u.path == '/':
+                user_id = self.get_user_from_cookie()
+                html = CHAT_PAGE if user_id in ("USER_A", "USER_B") else LOGIN_PAGE
+                self.send_html_response(html)
 
-
-            cookies = parse_cookies(self.headers.get("Cookie", ""))
-
-            uid = cookies.get("chat_user", "")
-
-            if uid not in ("USER_A", "USER_B"):
-
-                self.send_response(401)
-
-                self.send_header('Content-type', 'application/json')
-
-                self.end_headers()
-
-                self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
-
-                return
-
-
-            self.send_response(200); self.send_header('Content-type', 'application/json'); self.end_headers()
-
-            need_save = False
-
-            with LOCKED:
-
-                LAST_SEEN[uid] = time.time()
-
-                for m in MESSAGES:
-
-                    if m['sender_id'] != uid and not m.get('seen'): 
-
-                        m['seen'] = True; m['updated'] = time.time(); need_save = True
-
-                
-
-                news = [m for m in MESSAGES if m['timestamp'] > since or m.get('updated', 0) > since]
-
-                other_uid = next((k for k in LAST_SEEN if k != uid), None)
-
-                other_online = "Offline"
-
-                if other_uid:
-
-                    diff = time.time() - LAST_SEEN[other_uid]
-
-                    other_online = "Online" if diff < 10 else (datetime.now() - timedelta(seconds=diff) + timedelta(hours=3, minutes=30)).strftime("%H:%M")
-
-            news = [dict(m) for m in news]
-
-            if need_save: save_all()
-
-
-            self.wfile.write(json.dumps({
-
-                "me": uid,
-
-                "messages": news,
-
-                "is_typing": any(k != uid for k in TYPING_USERS.keys()),
-
-                "other_online": other_online
-
-            }).encode())
-
-
-
-    def do_POST(self):
-
-        l = int(self.headers['Content-Length'])
-
-        raw = self.rfile.read(l).decode()
-
-        
-        if self.path == '/login':
-
-            # raw مثل: p=9604
-
-            parsed = urllib.parse.parse_qs(raw)
-
-            p = parsed.get("p", [""])[0]
-
-
-
-            user_id = PASSWORD_TO_USER.get(p)
-
-            if user_id:
-
-                self.send_response(303)
-
-                # کوکی لاگین (برای همه مسیرها)
-
-                self.send_header("Set-Cookie", f"chat_user={user_id}; Path=/; SameSite=Lax")
-
-                self.send_header("Location", "/")
-
-                self.end_headers()
+            elif u.path == '/get_messages':
+                self.handle_get_messages(u.query)
 
             else:
-
-                self.send_response(303)
-
-                self.send_header("Location", "/")
-
+                self.send_response(404)
                 self.end_headers()
+                
+        except Exception as e:
+            logger.error(f"خطا در GET {self.path}: {e}")
+            self.send_response(500)
+            self.end_headers()
 
-            return
-
-
-
-
-
-        body = json.loads(raw)
-
-
-        cookies = parse_cookies(self.headers.get("Cookie", ""))
-
-        uid = cookies.get("chat_user", "")
-
+    def handle_get_messages(self, query):
+        """پردازش درخواست دریافت پیام‌ها"""
+        uid = self.get_user_from_cookie()
+        
         if uid not in ("USER_A", "USER_B"):
-
-            self.send_response(401); self.end_headers()
-
+            self.send_json_response({"error": "unauthorized"}, 401)
             return
-
-
-
-        # کاربر را از کوکی تحمیل کن (حتی اگر کلاینت چیز دیگری فرستاد)
-
-        body['u_id'] = uid
-
-        body['sender_id'] = uid
-
-
-        self.send_response(200); self.end_headers()
-
-        need_append = False
-
+        
+        p = urllib.parse.parse_qs(query)
+        since = float(p.get('since', [0])[0])
+        
         need_save = False
-
-        new_msg = None
-
-
+        news = []
+        other_online = "Offline"
+        
         with LOCKED:
-
-            if self.path == '/send_message':
-
-                body.update({'id': str(time.time()), 'timestamp': time.time(), 'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"), 'seen': False, 'react': None})
-
-                MESSAGES.append(body)
-
-                need_append = True
-
-                new_msg = dict(body)
+            LAST_SEEN[uid] = time.time()
             
+            # به‌روزرسانی seen برای پیام‌های جدید
+            for m in MESSAGES:
+                if m['sender_id'] != uid and not m.get('seen'):
+                    m['seen'] = True
+                    m['updated'] = time.time()
+                    need_save = True
+                    # به‌روزرسانی در دیتابیس
+                    update_message_in_db(m['id'], {'seen': 1, 'updated': m['updated']})
+            
+            # فیلتر پیام‌های جدید
+            news = [dict(m) for m in MESSAGES if m['timestamp'] > since or (m.get('updated') or 0) > since]
+            
+            # وضعیت آنلاین طرف مقابل
+            other_uid = next((k for k in LAST_SEEN if k != uid), None)
+            if other_uid:
+                diff = time.time() - LAST_SEEN[other_uid]
+                other_online = "Online" if diff < 10 else (datetime.now() - timedelta(seconds=diff) + timedelta(hours=3, minutes=30)).strftime("%H:%M")
+            
+            is_typing = any(k != uid for k in TYPING_USERS.keys())
+        
+        self.send_json_response({
+            "me": uid,
+            "messages": news,
+            "is_typing": is_typing,
+            "other_online": other_online
+        })
 
-
-
+    def do_POST(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(content_length).decode('utf-8')
+            
+            if self.path == '/login':
+                self.handle_login(raw)
+                return
+            
+            body = parse_json_safely(raw)
+            if not body and self.path != '/typing':
+                self.send_response(400)
+                self.end_headers()
+                return
+            
+            uid = self.get_user_from_cookie()
+            if uid not in ("USER_A", "USER_B"):
+                self.send_response(401)
+                self.end_headers()
+                return
+            
+            body['u_id'] = uid
+            body['sender_id'] = uid
+            
+            self.send_response(200)
+            self.end_headers()
+            
+            if self.path == '/send_message':
+                self.handle_send_message(body)
             elif self.path == '/delete_message':
-
-                for m in MESSAGES:
-
-                    if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
-
-                        m['deleted'] = True
-
-                        m['data'] = "-"
-
-                        m['updated'] = time.time()
-
-                        need_save = True
-
-                        break
-
-
-
+                self.handle_delete_message(body)
             elif self.path == '/react_message':
-
-                for m in MESSAGES:
-
-                    if m['id'] == body['id']:
-
-                        # جلوگیری از واکنش دادن به پیام خود کاربر
-                        if m['sender_id'] == body['u_id']:
-                            break
-                        
-                        # اگر همان ایموجی انتخاب شد، واکنش را حذف کن
-                        react_emoji = body.get('react')
-                        if m.get('react') == react_emoji:
-                            m['react'] = None
-                        else:
-                            m['react'] = react_emoji
-
-                        m['updated'] = time.time()
-
-                        need_save = True
-
-                        break
-
-
-
+                self.handle_react_message(body)
             elif self.path == '/edit_message':
-
-                for m in MESSAGES:
-
-                    if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
-
-                        # فقط پیام‌های متنی را می‌توان ویرایش کرد (غیر از عکس)
-                        if m.get('type') == 'image':
-                            break
-                        
-                        m['data'] = body['data']
-
-                        m['edited'] = True
-
-                        m['updated'] = time.time()
-
-                        need_save = True
-
-                        break
-
-
-
+                self.handle_edit_message(body)
             elif self.path == '/typing':
+                self.handle_typing(body)
+                
+        except Exception as e:
+            logger.error(f"خطا در POST {self.path}: {e}")
+            self.send_response(500)
+            self.end_headers()
 
-                TYPING_USERS[body['u_id']] = time.time()
+    def handle_login(self, raw):
+        """پردازش ورود کاربر"""
+        parsed = urllib.parse.parse_qs(raw)
+        p = parsed.get("p", [""])[0]
+        
+        user_id = PASSWORD_TO_USER.get(p)
+        if user_id:
+            logger.info(f"ورود موفق: {user_id}")
+            self.send_response(303)
+            self.send_header("Set-Cookie", f"chat_user={user_id}; Path=/; SameSite=Lax; HttpOnly")
+            self.send_header("Location", "/")
+            self.end_headers()
+        else:
+            logger.warning(f"تلاش ورود ناموفق")
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
 
+    def handle_send_message(self, body):
+        """پردازش ارسال پیام"""
+        message = {
+            'id': str(time.time()),
+            'sender_id': body['sender_id'],
+            'type': body.get('type', 'text'),
+            'data': body.get('data'),
+            'timestamp': time.time(),
+            'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"),
+            'seen': False,
+            'react': None,
+            'reply_id': body.get('reply_id'),
+            'reply_text': body.get('reply_text'),
+            'deleted': False,
+            'edited': False,
+            'updated': None
+        }
+        
+        with LOCKED:
+            MESSAGES.append(message)
+        
+        save_message_to_db(message)
+        logger.debug(f"پیام جدید از {body['sender_id']}")
 
+    def handle_delete_message(self, body):
+        """پردازش حذف پیام"""
+        with LOCKED:
+            for m in MESSAGES:
+                if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
+                    m['deleted'] = True
+                    m['data'] = "-"
+                    m['updated'] = time.time()
+                    update_message_in_db(m['id'], {
+                        'deleted': 1,
+                        'data': '-',
+                        'updated': m['updated']
+                    })
+                    logger.debug(f"پیام حذف شد: {body['id']}")
+                    break
 
-        # بیرون لاک
+    def handle_react_message(self, body):
+        """پردازش واکنش به پیام"""
+        with LOCKED:
+            for m in MESSAGES:
+                if m['id'] == body['id']:
+                    if m['sender_id'] == body['u_id']:
+                        break
+                    
+                    react_emoji = body.get('react')
+                    if m.get('react') == react_emoji:
+                        m['react'] = None
+                    else:
+                        m['react'] = react_emoji
+                    
+                    m['updated'] = time.time()
+                    update_message_in_db(m['id'], {
+                        'react': m['react'],
+                        'updated': m['updated']
+                    })
+                    break
 
-        if need_append:
+    def handle_edit_message(self, body):
+        """پردازش ویرایش پیام"""
+        with LOCKED:
+            for m in MESSAGES:
+                if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
+                    if m.get('type') == 'image':
+                        break
+                    
+                    m['data'] = body['data']
+                    m['edited'] = True
+                    m['updated'] = time.time()
+                    update_message_in_db(m['id'], {
+                        'data': m['data'],
+                        'edited': 1,
+                        'updated': m['updated']
+                    })
+                    logger.debug(f"پیام ویرایش شد: {body['id']}")
+                    break
 
-            append_one(new_msg)
-
-        if need_save:
-
-            save_all()
-
-
+    def handle_typing(self, body):
+        """پردازش وضعیت تایپ"""
+        with LOCKED:
+            TYPING_USERS[body['u_id']] = time.time()
 
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
-
-    daemon_threads = True; allow_reuse_address = True
-
+    daemon_threads = True
+    allow_reuse_address = True
 
 
 if __name__ == "__main__":
-
+    # مقداردهی اولیه دیتابیس
+    init_database()
+    load_messages_to_memory()
+    
+    # شروع thread های پاک‌سازی
+    threading.Thread(target=clean_typing, daemon=True).start()
+    threading.Thread(target=cleanup_data, daemon=True).start()
+    
+    # شروع سرور
     with ThreadingHTTPServer(("0.0.0.0", PORT), ChatHandler) as httpd:
-
-        print(f"Chat Server Running on Port {PORT}..."); httpd.serve_forever()
+        logger.info(f"سرور چت در پورت {PORT} شروع به کار کرد...")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            logger.info("سرور متوقف شد")
