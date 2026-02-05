@@ -654,8 +654,8 @@ CHAT_PAGE = r"""
     </div>
     <span onpointerdown="event.preventDefault();" onclick="cancelEdit(true)" style="cursor:pointer; font-size:20px; color:#54656f;">✕</span>
 </div>
-<div id="new-msg-bubble" onclick="scrollToBottom()">پیام جدید 👇</div>
-<div id="scroll-down-btn" onclick="scrollToBottom()" title="اسکرول به پایین">⬇</div>
+<div id="new-msg-bubble" onpointerdown="event.preventDefault();" onclick="scrollToBottom()">پیام جدید 👇</div>
+<div id="scroll-down-btn" onpointerdown="event.preventDefault();" onclick="scrollToBottom()" title="اسکرول به پایین">⬇</div>
 <div id="input-container">
     <button class="icon-btn send-btn" onpointerdown="event.preventDefault();" onclick="sendTxt()">
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
