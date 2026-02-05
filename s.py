@@ -661,11 +661,11 @@ CHAT_PAGE = r"""
         .voice-speed:hover { background: var(--send-icon-fill, #00a884); }
         .voice-speed.active { background: var(--send-icon-fill, #00a884); }
 
-        /* Recording UI */
+        /* Recording UI - روی موبایل با کیبورد باز بالای تکست‌باکس قرار می‌گیرد (--bubble-bottom) */
         #recording-ui {
             display: none;
             position: fixed;
-            bottom: 70px;
+            bottom: var(--bubble-bottom, 70px);
             left: 50%;
             transform: translateX(-50%);
             background: var(--card-bg, white);
