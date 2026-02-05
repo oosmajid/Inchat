@@ -554,6 +554,127 @@ CHAT_PAGE = r"""
         .icon-btn svg { fill: var(--icon-fill); width: 24px; height: 24px; transition: fill 0.3s; }
         .send-btn svg { fill: var(--send-icon-fill); }
 
+        /* Voice Player - مینیمال شبیه تلگرام */
+        .voice-player {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 12px;
+            background: var(--reply-area-bg, rgba(0,0,0,0.04));
+            border-radius: 12px;
+            min-width: 200px;
+            max-width: 280px;
+        }
+        .voice-play-btn {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: var(--send-icon-fill, #00a884);
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: transform 0.2s, background 0.2s;
+        }
+        .voice-play-btn:hover { transform: scale(1.1); }
+        .voice-play-btn:active { transform: scale(0.95); }
+        .voice-play-btn svg { fill: white; width: 16px; height: 16px; }
+        .voice-waveform {
+            flex: 1;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            gap: 2px;
+            cursor: pointer;
+        }
+        .voice-bar {
+            width: 3px;
+            background: var(--secondary-text, #54656f);
+            border-radius: 2px;
+            transition: background 0.2s;
+        }
+        .voice-bar.played { background: var(--send-icon-fill, #00a884); }
+        .voice-info {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 2px;
+            min-width: 40px;
+        }
+        .voice-time { font-size: 11px; color: var(--secondary-text, #54656f); font-variant-numeric: tabular-nums; }
+        .voice-speed {
+            font-size: 9px;
+            padding: 2px 5px;
+            background: var(--secondary-text, #54656f);
+            color: white;
+            border-radius: 8px;
+            cursor: pointer;
+            user-select: none;
+            transition: background 0.2s;
+        }
+        .voice-speed:hover { background: var(--send-icon-fill, #00a884); }
+        .voice-speed.active { background: var(--send-icon-fill, #00a884); }
+
+        /* Recording UI */
+        #recording-ui {
+            display: none;
+            position: fixed;
+            bottom: 70px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--card-bg, white);
+            padding: 16px 24px;
+            border-radius: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+            z-index: 1000;
+            align-items: center;
+            gap: 16px;
+            animation: slideUp 0.3s ease;
+        }
+        #recording-ui.show { display: flex; }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateX(-50%) translateY(20px); }
+            to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+        .recording-indicator {
+            width: 12px;
+            height: 12px;
+            background: #f44336;
+            border-radius: 50%;
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+        .recording-time { font-size: 16px; font-weight: 500; color: var(--text-color); font-variant-numeric: tabular-nums; min-width: 50px; }
+        .recording-cancel {
+            padding: 8px 16px;
+            background: transparent;
+            border: 1px solid var(--secondary-text, #54656f);
+            border-radius: 20px;
+            color: var(--secondary-text, #54656f);
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .recording-cancel:hover { background: rgba(0,0,0,0.05); }
+        .recording-send {
+            padding: 8px 16px;
+            background: var(--send-icon-fill, #00a884);
+            border: none;
+            border-radius: 20px;
+            color: white;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .recording-send:hover { background: #008069; }
+        .mic-btn.recording svg { fill: #f44336 !important; }
+
         #reply-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; }
         #edit-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; border-top-color: #ff9800; }
 
@@ -656,11 +777,20 @@ CHAT_PAGE = r"""
 </div>
 <div id="new-msg-bubble" onpointerdown="event.preventDefault();" onclick="scrollToBottom()">پیام جدید 👇</div>
 <div id="scroll-down-btn" onpointerdown="event.preventDefault();" onclick="scrollToBottom()" title="اسکرول به پایین">⬇</div>
+<div id="recording-ui">
+    <div class="recording-indicator"></div>
+    <span class="recording-time" id="recording-time">0:00</span>
+    <button class="recording-cancel" onclick="cancelRecording()">انصراف</button>
+    <button class="recording-send" onclick="sendRecording()">ارسال</button>
+</div>
 <div id="input-container">
     <button class="icon-btn send-btn" onpointerdown="event.preventDefault();" onclick="sendTxt()">
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
     </button>
     <textarea id="msgInput" placeholder="پیام بنویسید..." rows="1" oninput="autoGrow(this)"></textarea>
+    <button class="icon-btn mic-btn" id="mic-btn" onpointerdown="event.preventDefault();" onclick="toggleRecording()">
+        <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+    </button>
     <button class="icon-btn" onclick="document.getElementById('fInp').click()">
         <svg viewBox="0 0 24 24"><path d="M19 7v2.99s-1.99.01-2 0V7h-3s.01-1.99 0-2h3V2h2v3h3v2h-3zm-3 4V8h-3V5H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8h-3zM5 19l3-4 2 3 3-4 4 5H5z"/></svg>
     </button>
@@ -946,12 +1076,48 @@ CHAT_PAGE = r"""
         const div = old || document.createElement('div');
         div.id = 'msg-' + m.id;
         div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
+
+        if (old && (m.type === 'voice' || m.type === 'image')) {
+            var liteReplyText = m.reply_text ? await dec(m.reply_text) : '';
+            var liteReply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${liteReplyText}</div>` : '';
+            var liteReact = m.react ? `<div class="reaction">${m.react}</div>` : '';
+            var liteSeen = (m.sender_id === myId && m.seen) ? '<span class="seen-status">✓✓</span>' : (m.sender_id === myId ? '✓' : '');
+            var liteEditedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
+            var liteFooter = `<div class="footer-info">${liteEditedIcon}<span>${m.time}</span> ${liteSeen}</div>`;
+            var liteReplyLabel = m.type === 'image' ? 'تصویر' : 'پیام صوتی';
+            var liteActions = `<div class="msg-actions">
+                ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
+                ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+                <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${liteReplyLabel}')">پاسخ</span>
+            </div>`;
+            var replyEl = old.querySelector('.reply-area');
+            if (liteReply) {
+                if (replyEl) replyEl.outerHTML = liteReply;
+                else {
+                    var bodyRef = old.querySelector('.voice-player') || old.querySelector('img');
+                    if (bodyRef) bodyRef.insertAdjacentHTML('beforebegin', liteReply);
+                }
+            } else if (replyEl) replyEl.remove();
+            var reactEl = old.querySelector('.reaction');
+            if (liteReact) {
+                if (reactEl) reactEl.outerHTML = liteReact;
+                else {
+                    var bodyRef2 = old.querySelector('.voice-player') || old.querySelector('img');
+                    if (bodyRef2) bodyRef2.insertAdjacentHTML('afterend', liteReact);
+                }
+            } else if (reactEl) reactEl.remove();
+            var footerEl = old.querySelector('.footer-info');
+            if (footerEl) footerEl.outerHTML = liteFooter;
+            var actionsEl = old.querySelector('.msg-actions');
+            if (actionsEl) actionsEl.outerHTML = liteActions;
+            return;
+        }
         
         let longPressHappened = false;
         if (m.sender_id !== myId) {
             div.onclick = (e) => {
                 // جلوگیری از باز شدن منو روی لینک، عکس، اکشن‌ها یا reply-area
-                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area')) {
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area') || e.target.closest('.voice-player')) {
                     return;
                 }
                 if (longPressHappened) {
@@ -971,7 +1137,7 @@ CHAT_PAGE = r"""
         
         div.addEventListener('touchstart', (e) => {
             if (e.target && (e.target.closest('img'))) return;
-            if (m.type === 'image') return;
+            if (m.type === 'image' || m.type === 'voice') return;
             longPressHappened = false;
             pressTimer = setTimeout(async () => {
                 longPressHappened = true;
@@ -1016,13 +1182,18 @@ CHAT_PAGE = r"""
         
         let actions = `<div class="msg-actions">
             ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
-            ${m.sender_id === myId && m.type !== 'image' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
-            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
+            ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : m.type === 'voice' ? 'پیام صوتی' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
         </div>`;
 
-        let body = m.type === 'image'
-        ? `<img src="${content}" style="max-width:100%; border-radius:12px;">`
-        : `<div>${linkify(content)}</div>`;
+        let body;
+        if (m.type === 'image') {
+            body = `<img src="${content}" style="max-width:100%; border-radius:12px;">`;
+        } else if (m.type === 'voice') {
+            body = createVoicePlayer(content, m.id);
+        } else {
+            body = `<div>${linkify(content)}</div>`;
+        }
 
         let editedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
         div.innerHTML = `${reply} ${body} ${react} <div class="footer-info">${editedIcon}<span>${m.time}</span> ${seen}</div> ${actions}`;
@@ -1121,6 +1292,277 @@ CHAT_PAGE = r"""
         img.src = URL.createObjectURL(file);
     }
 
+    // --- Voice Recording ---
+    let mediaRecorder = null;
+    let audioChunks = [];
+    let recordingStartTime = 0;
+    let recordingTimer = null;
+    let recordedBlob = null;
+
+    async function toggleRecording() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        } else {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    }
+                });
+                let options = { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 16000 };
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = { mimeType: 'audio/webm', audioBitsPerSecond: 16000 };
+                }
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = { mimeType: 'audio/mp4', audioBitsPerSecond: 16000 };
+                }
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = {};
+                }
+                mediaRecorder = new MediaRecorder(stream, options);
+                audioChunks = [];
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) audioChunks.push(e.data);
+                };
+                mediaRecorder.onstop = () => {
+                    stream.getTracks().forEach(t => t.stop());
+                    recordedBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+                    document.getElementById('mic-btn').classList.remove('recording');
+                };
+                mediaRecorder.start(1000);
+                recordingStartTime = Date.now();
+                document.getElementById('mic-btn').classList.add('recording');
+                document.getElementById('recording-ui').classList.add('show');
+                updateRecordingTime();
+            } catch(e) {
+                console.error('Microphone access denied:', e);
+                alert('دسترسی به میکروفون داده نشد');
+            }
+        }
+    }
+
+    function updateRecordingTime() {
+        if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+        const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
+        const mins = Math.floor(elapsed / 60);
+        const secs = elapsed % 60;
+        document.getElementById('recording-time').textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+        recordingTimer = setTimeout(updateRecordingTime, 1000);
+    }
+
+    function cancelRecording() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        }
+        if (recordingTimer) clearTimeout(recordingTimer);
+        document.getElementById('recording-ui').classList.remove('show');
+        document.getElementById('mic-btn').classList.remove('recording');
+        recordedBlob = null;
+        audioChunks = [];
+    }
+
+    async function sendRecording() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+            await new Promise(r => setTimeout(r, 300));
+        }
+        if (recordingTimer) clearTimeout(recordingTimer);
+        document.getElementById('recording-ui').classList.remove('show');
+        if (!recordedBlob || recordedBlob.size === 0) {
+            recordedBlob = null;
+            audioChunks = [];
+            return;
+        }
+        if (recordedBlob.size > 1024 * 1024) {
+            alert('حجم ویس بیش از حد مجاز است (حداکثر 1 مگابایت)');
+            recordedBlob = null;
+            audioChunks = [];
+            return;
+        }
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+            try {
+                const base64 = reader.result;
+                if (!base64 || base64.length < 50) return;
+                const encData = await enc(base64);
+                const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
+                await postAction('/send_message', {
+                    type: 'voice',
+                    data: encData,
+                    reply_id: replyingTo ? replyingTo.id : null,
+                    reply_text: encReplyText
+                });
+                cancelReply();
+                recordedBlob = null;
+                audioChunks = [];
+                setTimeout(() => scrollToBottom(), 100);
+            } catch(e) {
+                console.error('Error sending voice:', e);
+                alert('خطا در ارسال ویس');
+            } finally {
+                recordedBlob = null;
+                audioChunks = [];
+            }
+        };
+        reader.onerror = () => { recordedBlob = null; audioChunks = []; };
+        reader.readAsDataURL(recordedBlob);
+    }
+
+    // --- Voice Player: waveform قابل کلیک، دکمه 1.5x ---
+    function createVoicePlayer(src, msgId) {
+        const audio = new Audio(src);
+        const bars = [];
+        for (let i = 0; i < 25; i++) {
+            bars.push(Math.random() * 20 + 8);
+        }
+        const barsHtml = bars.map((h, i) =>
+            `<div class="voice-bar" data-idx="${i}" style="height:${h}px"></div>`
+        ).join('');
+        const html = `
+            <div class="voice-player" data-msg="${msgId}">
+                <button class="voice-play-btn" onclick="toggleVoicePlay('${msgId}')">
+                    <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                    <svg class="pause-icon" style="display:none" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                </button>
+                <div class="voice-waveform" onclick="seekVoice(event, '${msgId}')">${barsHtml}</div>
+                <div class="voice-info">
+                    <span class="voice-time" id="vtime-${msgId}">0:00</span>
+                    <span class="voice-speed" onclick="toggleVoiceSpeed('${msgId}')">1x</span>
+                </div>
+            </div>
+        `;
+        setTimeout(() => {
+            window['audio_' + msgId] = audio;
+            function updateDuration() {
+                const dur = audio.duration;
+                if (dur && isFinite(dur) && !isNaN(dur)) {
+                    const durSec = Math.floor(dur);
+                    const mins = Math.floor(durSec / 60);
+                    const secs = durSec % 60;
+                    const el = document.getElementById('vtime-' + msgId);
+                    if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+                }
+            }
+            audio.onloadedmetadata = updateDuration;
+            audio.ondurationchange = updateDuration;
+            audio.oncanplaythrough = updateDuration;
+            audio.ontimeupdate = () => updateVoiceProgress(msgId);
+            audio.onended = () => {
+                const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
+                if (player) {
+                    player.querySelector('.play-icon').style.display = 'block';
+                    player.querySelector('.pause-icon').style.display = 'none';
+                    player.querySelectorAll('.voice-bar').forEach(b => b.classList.remove('played'));
+                }
+                audio.currentTime = 0;
+                const dur = audio.duration;
+                if (dur && isFinite(dur)) {
+                    const mins = Math.floor(dur / 60);
+                    const secs = Math.floor(dur % 60);
+                    const el = document.getElementById('vtime-' + msgId);
+                    if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+                }
+            };
+        }, 0);
+        return html;
+    }
+
+    function toggleVoicePlay(msgId) {
+        const audio = window['audio_' + msgId];
+        if (!audio) return;
+        const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
+        if (!player) return;
+        if (audio.paused) {
+            document.querySelectorAll('.voice-player').forEach(p => {
+                const id = p.dataset.msg;
+                const a = window['audio_' + id];
+                if (a && !a.paused && id !== msgId) {
+                    a.pause();
+                    const pi = p.querySelector('.play-icon');
+                    const pai = p.querySelector('.pause-icon');
+                    if (pi) pi.style.display = 'block';
+                    if (pai) pai.style.display = 'none';
+                    const dur = a.duration;
+                    if (dur && isFinite(dur)) {
+                        const el = document.getElementById('vtime-' + id);
+                        if (el) el.textContent = `${Math.floor(dur/60)}:${Math.floor(dur%60).toString().padStart(2,'0')}`;
+                    }
+                }
+            });
+            audio.play();
+            const pi = player.querySelector('.play-icon');
+            const pai = player.querySelector('.pause-icon');
+            if (pi) pi.style.display = 'none';
+            if (pai) pai.style.display = 'block';
+        } else {
+            audio.pause();
+            const pi = player.querySelector('.play-icon');
+            const pai = player.querySelector('.pause-icon');
+            if (pi) pi.style.display = 'block';
+            if (pai) pai.style.display = 'none';
+            const dur = audio.duration;
+            if (dur && isFinite(dur)) {
+                const el = document.getElementById('vtime-' + msgId);
+                if (el) el.textContent = `${Math.floor(dur/60)}:${Math.floor(dur%60).toString().padStart(2,'0')}`;
+            }
+        }
+    }
+
+    function toggleVoiceSpeed(msgId) {
+        const audio = window['audio_' + msgId];
+        if (!audio) return;
+        const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
+        const speedBtn = player?.querySelector('.voice-speed');
+        if (!speedBtn) return;
+        if (audio.playbackRate === 1) {
+            audio.playbackRate = 1.5;
+            speedBtn.textContent = '1.5x';
+            speedBtn.classList.add('active');
+        } else {
+            audio.playbackRate = 1;
+            speedBtn.textContent = '1x';
+            speedBtn.classList.remove('active');
+        }
+    }
+
+    function updateVoiceProgress(msgId) {
+        const audio = window['audio_' + msgId];
+        if (!audio) return;
+        const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
+        if (!player) return;
+        const duration = audio.duration;
+        const currentTime = audio.currentTime;
+        const el = document.getElementById('vtime-' + msgId);
+        if (duration && isFinite(duration) && duration > 0) {
+            const progress = currentTime / duration;
+            const bars = player.querySelectorAll('.voice-bar');
+            const playedBars = Math.floor(progress * bars.length);
+            bars.forEach((bar, i) => {
+                if (i < playedBars) bar.classList.add('played');
+                else bar.classList.remove('played');
+            });
+        }
+        if (el) {
+            let timeToShow = (!audio.paused && currentTime > 0) ? Math.floor(currentTime) : (duration && isFinite(duration) && duration > 0 ? Math.floor(duration) : 0);
+            const mins = Math.floor(timeToShow / 60);
+            const secs = timeToShow % 60;
+            el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+    }
+
+    function seekVoice(event, msgId) {
+        const audio = window['audio_' + msgId];
+        if (!audio || !audio.duration) return;
+        const waveform = event.currentTarget;
+        const rect = waveform.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const progress = Math.max(0, Math.min(1, x / rect.width));
+        audio.currentTime = progress * audio.duration;
+    }
+
     async function postAction(path, p) {
         try {
             await fetch(path, {method:'POST', body: JSON.stringify({...p})});
@@ -1153,6 +1595,7 @@ CHAT_PAGE = r"""
     function editMsg(id, isEdited) {
         const msgEl = document.getElementById('msg-' + id);
         if (!msgEl) return;
+        if (msgEl.querySelector('.voice-player')) return;
         
         const bodyDiv = msgEl.querySelector('div:not(.reply-area):not(.reaction):not(.footer-info):not(.msg-actions)');
         if (!bodyDiv) return;
@@ -1417,8 +1860,14 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                     # به‌روزرسانی در دیتابیس
                     update_message_in_db(m['id'], {'seen': 1, 'updated': m['updated']})
             
-            # فیلتر پیام‌های جدید
-            news = [dict(m) for m in MESSAGES if m['timestamp'] > since or (m.get('updated') or 0) > since]
+            # فیلتر پیام‌های جدید؛ برای به‌روزرسانی‌های سبک (مثلاً seen) دادهٔ حجیم ویس/عکس را نفرست
+            news = []
+            for m in MESSAGES:
+                if m['timestamp'] > since or (m.get('updated') or 0) > since:
+                    msg_dict = dict(m)
+                    if m['timestamp'] <= since and m.get('type') in ('voice', 'image'):
+                        msg_dict.pop('data', None)
+                    news.append(msg_dict)
             
             # وضعیت آنلاین طرف مقابل
             other_uid = next((k for k in LAST_SEEN if k != uid), None)
@@ -1562,7 +2011,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         with LOCKED:
             for m in MESSAGES:
                 if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
-                    if m.get('type') == 'image':
+                    if m.get('type') in ('image', 'voice'):
                         break
                     
                     m['data'] = body['data']
