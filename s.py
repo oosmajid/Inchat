@@ -233,8 +233,14 @@ def parse_json_safely(data: str) -> dict:
 LOGIN_PAGE = """
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
-<head><meta charset="UTF-8"><title>ورود</title>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+    <meta name="theme-color" content="#eceff1">
+    <title>ورود</title>
 <style>
+    * { box-sizing: border-box; }
+
     :root {
         --bg-color: #eceff1;
         --card-bg: white;
@@ -259,8 +265,11 @@ LOGIN_PAGE = """
         display: flex; 
         justify-content: center; 
         align-items: center; 
-        height: 100vh; 
-        margin: 0; 
+        min-height: 100vh;
+        min-height: 100dvh;
+        height: 100%;
+        margin: 0;
+        padding: 16px;
         transition: background 0.3s;
     }
 
@@ -269,7 +278,8 @@ LOGIN_PAGE = """
         padding: 40px; 
         border-radius: 28px; 
         text-align: center; 
-        width: 340px; 
+        width: 100%;
+        max-width: 340px; 
         box-shadow: 0 10px 25px rgba(0,0,0,0.1); 
         transition: background 0.3s;
     }
@@ -304,22 +314,57 @@ LOGIN_PAGE = """
     }
 
     button:hover { background: var(--button-hover); }
+    button:active { opacity: 0.9; }
 
     .theme-toggle {
-        position: absolute;
-        top: 20px;
-        left: 20px;
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        left: auto;
         background: var(--card-bg);
         border: 1px solid var(--input-border);
         border-radius: 50%;
-        width: 40px;
-        height: 40px;
+        width: 44px;
+        height: 44px;
         cursor: pointer;
         display: flex;
         align-items: center;
         justify-content: center;
         font-size: 20px;
         transition: all 0.3s;
+        z-index: 10;
+        -webkit-tap-highlight-color: transparent;
+    }
+    .theme-toggle:hover { opacity: 0.9; }
+    .theme-toggle:active { transform: scale(0.95); }
+
+    /* موبایل ویو */
+    @media (max-width: 480px) {
+        body { padding: 12px; align-items: center; }
+        .card {
+            padding: 28px 24px;
+            border-radius: 20px;
+            max-width: none;
+        }
+        h2 { font-size: 1.25rem; margin-bottom: 16px; }
+        input, button {
+            padding: 14px;
+            margin: 12px 0;
+            font-size: 16px;
+            min-height: 48px;
+        }
+        .theme-toggle {
+            top: 12px;
+            right: 12px;
+            width: 40px;
+            height: 40px;
+            font-size: 18px;
+        }
+    }
+
+    @media (max-width: 360px) {
+        .card { padding: 20px 16px; border-radius: 16px; }
+        h2 { font-size: 1.1rem; }
     }
 
 </style>
