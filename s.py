@@ -9,6 +9,7 @@ import logging
 import sqlite3
 import hashlib
 import base64
+import re
 from datetime import datetime, timedelta
 from collections import deque
 from http.cookies import SimpleCookie
@@ -35,6 +36,7 @@ PASSWORD_TO_USER = {
 }
 
 DB_FILE = "chat_history.db"
+MEDIA_DIR = "encrypted_media"
 
 # استفاده از deque برای محدود کردن پیام‌ها در حافظه
 MESSAGES = deque(maxlen=MAX_MESSAGES_IN_MEMORY)
@@ -47,6 +49,44 @@ LOCKED = threading.RLock()
 # --- کلید رمزنگاری AES-like (ساده‌شده برای سازگاری با مرورگر) ---
 # نکته: برای امنیت بیشتر باید از Web Crypto API استفاده شود
 ENCRYPTION_SALT = "chat_secure_2024"
+
+
+def ensure_media_dir():
+    """ایجاد پوشه ذخیره‌سازی فایل‌های رسانه‌ای"""
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+
+
+def parse_video_note_data(data):
+    """استخراج اطلاعات فایل پیام ویدیویی از داده پیام"""
+    if not data:
+        return None
+    try:
+        parsed = json.loads(data) if isinstance(data, str) else data
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get('kind') != 'video_note':
+        return None
+    file_name = parsed.get('file')
+    if not file_name or '/' in file_name or '\\' in file_name:
+        return None
+    return parsed
+
+
+def delete_video_note_file(message):
+    """حذف فایل پیام ویدیویی مرتبط با پیام"""
+    if message.get('type') != 'video_note':
+        return
+    media = parse_video_note_data(message.get('data'))
+    if not media:
+        return
+    file_path = os.path.join(MEDIA_DIR, media['file'])
+    if os.path.isfile(file_path):
+        try:
+            os.remove(file_path)
+        except Exception as e:
+            logger.warning(f"خطا در حذف فایل پیام ویدیویی {file_path}: {e}")
 
 
 # --- مدیریت دیتابیس SQLite ---
@@ -179,6 +219,11 @@ def cleanup_old_messages():
         cursor = conn.cursor()
         
         expiry_time = time.time() - (MESSAGE_EXPIRY_HOURS * 3600)
+        cursor.execute('SELECT type, data FROM messages WHERE timestamp < ?', (expiry_time,))
+        old_rows = cursor.fetchall()
+        for row in old_rows:
+            if row['type'] == 'video_note':
+                delete_video_note_file(dict(row))
         cursor.execute('DELETE FROM messages WHERE timestamp < ?', (expiry_time,))
         
         deleted_count = cursor.rowcount
@@ -597,6 +642,20 @@ CHAT_PAGE = r"""
         [data-theme="dark"] .icon-btn:hover { background: rgba(255,255,255,0.1); }
         .icon-btn svg { fill: var(--icon-fill); width: 24px; height: 24px; transition: fill 0.3s; }
         .send-btn svg { fill: var(--send-icon-fill); }
+        #video-note-btn {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
+        #video-note-btn::after {
+            content: none;
+        }
+        #video-note-btn svg {
+            width: 24px;
+            height: 24px;
+            fill: var(--icon-fill);
+            filter: none;
+        }
 
         /* Voice Player - مینیمال شبیه تلگرام */
         .voice-player {
@@ -661,6 +720,35 @@ CHAT_PAGE = r"""
         .voice-speed:hover { background: var(--send-icon-fill, #00a884); }
         .voice-speed.active { background: var(--send-icon-fill, #00a884); }
 
+        .video-note {
+            width: 168px;
+            height: 168px;
+            border-radius: 50%;
+            overflow: hidden;
+            position: relative;
+            background: #000;
+            border: 2px solid rgba(255,255,255,0.18);
+            cursor: pointer;
+        }
+        .video-note video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .video-note-play {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,0.25);
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+        .video-note.playing .video-note-play { opacity: 0; }
+        .video-note-play svg { width: 34px; height: 34px; fill: white; }
+
         /* Recording UI - روی موبایل با کیبورد باز بالای تکست‌باکس قرار می‌گیرد (--bubble-bottom) */
         #recording-ui {
             display: none;
@@ -718,6 +806,30 @@ CHAT_PAGE = r"""
         }
         .recording-send:hover { background: #008069; }
         .mic-btn.recording svg { fill: #f44336 !important; }
+        #video-note-ui {
+            display: none;
+            position: fixed;
+            bottom: var(--bubble-bottom, 70px);
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--reply-preview-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 20px;
+            box-shadow: 0 8px 28px rgba(0,0,0,0.28);
+            padding: 14px;
+            z-index: 1200;
+            align-items: center;
+            gap: 12px;
+        }
+        #video-note-ui.show { display: flex; }
+        #video-note-preview {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            object-fit: cover;
+            background: #000;
+            border: 2px solid rgba(0,0,0,0.12);
+        }
 
         #reply-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; }
         #edit-preview { display: none; background: var(--reply-preview-bg); color: var(--text-color); padding: 10px 20px; border-top: 1px solid var(--input-border); justify-content: space-between; align-items: center; transition: background 0.3s, border-color 0.3s, color 0.3s; border-top-color: #ff9800; }
@@ -827,11 +939,19 @@ CHAT_PAGE = r"""
     <button class="recording-cancel" onclick="cancelRecording()">انصراف</button>
     <button class="recording-send" onclick="sendRecording()">ارسال</button>
 </div>
+<div id="video-note-ui">
+    <video id="video-note-preview" muted autoplay playsinline></video>
+    <button class="recording-cancel" onclick="cancelVideoNote()">انصراف</button>
+    <button class="recording-send" onclick="sendVideoNote()">ارسال</button>
+</div>
 <div id="input-container">
     <button class="icon-btn send-btn" onpointerdown="event.preventDefault();" onclick="sendTxt()">
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
     </button>
     <textarea id="msgInput" placeholder="پیام بنویسید..." rows="1" oninput="autoGrow(this)"></textarea>
+    <button class="icon-btn" id="video-note-btn" onpointerdown="event.preventDefault();" onclick="toggleVideoNoteRecording()" title="Video Note">
+        <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+    </button>
     <button class="icon-btn mic-btn" id="mic-btn" onpointerdown="event.preventDefault();" onclick="toggleRecording()">
         <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
     </button>
@@ -1062,6 +1182,39 @@ CHAT_PAGE = r"""
         }
     }
 
+    async function encryptBinary(arrayBuffer) {
+        await initCrypto();
+        if (!(cryptoKey && window.crypto && window.crypto.subtle)) {
+            throw new Error('Secure crypto unavailable');
+        }
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encrypted = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: iv },
+            cryptoKey,
+            arrayBuffer
+        );
+        const combined = new Uint8Array(iv.length + encrypted.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(encrypted), iv.length);
+        return combined;
+    }
+
+    async function decryptBinary(bytes) {
+        await initCrypto();
+        if (!(cryptoKey && window.crypto && window.crypto.subtle)) {
+            throw new Error('Secure crypto unavailable');
+        }
+        const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+        const iv = data.slice(0, 12);
+        const encrypted = data.slice(12);
+        const decrypted = await crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv: iv },
+            cryptoKey,
+            encrypted
+        );
+        return decrypted;
+    }
+
     function autoGrow(el) {
         el.style.height = '40px';
         el.style.height = (el.scrollHeight) + 'px';
@@ -1121,24 +1274,24 @@ CHAT_PAGE = r"""
         div.id = 'msg-' + m.id;
         div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
 
-        if (old && (m.type === 'voice' || m.type === 'image')) {
+        if (old && (m.type === 'voice' || m.type === 'image' || m.type === 'video_note')) {
             var liteReplyText = m.reply_text ? await dec(m.reply_text) : '';
             var liteReply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${liteReplyText}</div>` : '';
             var liteReact = m.react ? `<div class="reaction">${m.react}</div>` : '';
             var liteSeen = (m.sender_id === myId && m.seen) ? '<span class="seen-status">✓✓</span>' : (m.sender_id === myId ? '✓' : '');
             var liteEditedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
             var liteFooter = `<div class="footer-info">${liteEditedIcon}<span>${m.time}</span> ${liteSeen}</div>`;
-            var liteReplyLabel = m.type === 'image' ? 'تصویر' : 'پیام صوتی';
+            var liteReplyLabel = m.type === 'image' ? 'تصویر' : (m.type === 'video_note' ? 'پیام ویدیویی' : 'پیام صوتی');
             var liteActions = `<div class="msg-actions">
                 ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
-                ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+                ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' && m.type !== 'video_note' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
                 <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${liteReplyLabel}')">پاسخ</span>
             </div>`;
             var replyEl = old.querySelector('.reply-area');
             if (liteReply) {
                 if (replyEl) replyEl.outerHTML = liteReply;
                 else {
-                    var bodyRef = old.querySelector('.voice-player') || old.querySelector('img');
+                    var bodyRef = old.querySelector('.voice-player') || old.querySelector('.video-note') || old.querySelector('img');
                     if (bodyRef) bodyRef.insertAdjacentHTML('beforebegin', liteReply);
                 }
             } else if (replyEl) replyEl.remove();
@@ -1146,7 +1299,7 @@ CHAT_PAGE = r"""
             if (liteReact) {
                 if (reactEl) reactEl.outerHTML = liteReact;
                 else {
-                    var bodyRef2 = old.querySelector('.voice-player') || old.querySelector('img');
+                    var bodyRef2 = old.querySelector('.voice-player') || old.querySelector('.video-note') || old.querySelector('img');
                     if (bodyRef2) bodyRef2.insertAdjacentHTML('afterend', liteReact);
                 }
             } else if (reactEl) reactEl.remove();
@@ -1161,7 +1314,7 @@ CHAT_PAGE = r"""
         if (m.sender_id !== myId) {
             div.onclick = (e) => {
                 // جلوگیری از باز شدن منو روی لینک، عکس، اکشن‌ها یا reply-area
-                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area') || e.target.closest('.voice-player')) {
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area') || e.target.closest('.voice-player') || e.target.closest('.video-note')) {
                     return;
                 }
                 if (longPressHappened) {
@@ -1177,11 +1330,21 @@ CHAT_PAGE = r"""
             if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
         }
 
-        const decryptedData = await dec(m.data);
+        let decryptedData = "";
+        let videoMeta = null;
+        if (m.type === 'video_note') {
+            try {
+                videoMeta = JSON.parse(m.data || '{}');
+            } catch (e) {
+                videoMeta = null;
+            }
+        } else {
+            decryptedData = await dec(m.data);
+        }
         
         div.addEventListener('touchstart', (e) => {
             if (e.target && (e.target.closest('img'))) return;
-            if (m.type === 'image' || m.type === 'voice') return;
+            if (m.type === 'image' || m.type === 'voice' || m.type === 'video_note') return;
             longPressHappened = false;
             pressTimer = setTimeout(async () => {
                 longPressHappened = true;
@@ -1226,8 +1389,8 @@ CHAT_PAGE = r"""
         
         let actions = `<div class="msg-actions">
             ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
-            ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
-            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : m.type === 'voice' ? 'پیام صوتی' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
+            ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' && m.type !== 'video_note' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : m.type === 'voice' ? 'پیام صوتی' : m.type === 'video_note' ? 'پیام ویدیویی' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
         </div>`;
 
         let body;
@@ -1235,6 +1398,8 @@ CHAT_PAGE = r"""
             body = `<img src="${content}" style="max-width:100%; border-radius:12px;">`;
         } else if (m.type === 'voice') {
             body = createVoicePlayer(content, m.id);
+        } else if (m.type === 'video_note') {
+            body = createVideoNotePlayer(videoMeta, m.id);
         } else {
             body = `<div>${linkify(content)}</div>`;
         }
@@ -1342,6 +1507,10 @@ CHAT_PAGE = r"""
     let recordingStartTime = 0;
     let recordingTimer = null;
     let recordedBlob = null;
+    let videoRecorder = null;
+    let videoChunks = [];
+    let recordedVideoBlob = null;
+    let videoStreamRef = null;
 
     async function toggleRecording() {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
@@ -1385,6 +1554,103 @@ CHAT_PAGE = r"""
                 console.error('Microphone access denied:', e);
                 alert('دسترسی به میکروفون داده نشد');
             }
+        }
+    }
+
+    async function toggleVideoNoteRecording() {
+        if (videoRecorder && videoRecorder.state === 'recording') return;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'user', width: { ideal: 360 }, height: { ideal: 360 } },
+                audio: true
+            });
+            videoStreamRef = stream;
+            const preview = document.getElementById('video-note-preview');
+            preview.srcObject = stream;
+
+            let options = { mimeType: 'video/webm;codecs=vp8,opus', videoBitsPerSecond: 450000 };
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                options = { mimeType: 'video/webm', videoBitsPerSecond: 450000 };
+            }
+            if (!MediaRecorder.isTypeSupported(options.mimeType)) options = {};
+
+            videoRecorder = new MediaRecorder(stream, options);
+            videoChunks = [];
+            recordedVideoBlob = null;
+            videoRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) videoChunks.push(event.data);
+            };
+            videoRecorder.onstop = () => {
+                recordedVideoBlob = new Blob(videoChunks, { type: videoRecorder.mimeType || 'video/webm' });
+                stopVideoStream();
+            };
+            videoRecorder.start(250);
+            document.getElementById('video-note-ui').classList.add('show');
+        } catch (error) {
+            console.error('Camera access denied:', error);
+            alert('دسترسی به دوربین داده نشد');
+        }
+    }
+
+    function stopVideoStream() {
+        if (videoStreamRef) {
+            videoStreamRef.getTracks().forEach(track => track.stop());
+            videoStreamRef = null;
+        }
+        const preview = document.getElementById('video-note-preview');
+        if (preview) preview.srcObject = null;
+    }
+
+    function cancelVideoNote() {
+        if (videoRecorder && videoRecorder.state === 'recording') {
+            videoRecorder.stop();
+        } else {
+            stopVideoStream();
+        }
+        document.getElementById('video-note-ui').classList.remove('show');
+        videoChunks = [];
+        recordedVideoBlob = null;
+    }
+
+    async function sendVideoNote() {
+        if (videoRecorder && videoRecorder.state === 'recording') {
+            videoRecorder.stop();
+            await new Promise(resolve => setTimeout(resolve, 350));
+        }
+        document.getElementById('video-note-ui').classList.remove('show');
+
+        if (!recordedVideoBlob || recordedVideoBlob.size === 0) {
+            recordedVideoBlob = null;
+            videoChunks = [];
+            return;
+        }
+        if (recordedVideoBlob.size > 8 * 1024 * 1024) {
+            alert('حجم پیام ویدیویی بیش از حد مجاز است (حداکثر 8 مگابایت)');
+            recordedVideoBlob = null;
+            videoChunks = [];
+            return;
+        }
+
+        try {
+            const encryptedBytes = await encryptBinary(await recordedVideoBlob.arrayBuffer());
+            const encReplyText = replyingTo ? await enc(replyingTo.text) : '';
+            await fetch(`/upload_video_note?mime=${encodeURIComponent(recordedVideoBlob.type || 'video/webm')}`, {
+                method: 'POST',
+                headers: {
+                    'X-Reply-Id': replyingTo ? replyingTo.id : '',
+                    'X-Reply-Text': encReplyText
+                },
+                body: new Blob([encryptedBytes], { type: 'application/octet-stream' })
+            });
+            cancelReply();
+            fetchMessages();
+            setTimeout(() => scrollToBottom(), 100);
+        } catch (error) {
+            console.error('Error sending video note:', error);
+            alert('ارسال پیام ویدیویی ناموفق بود');
+        } finally {
+            recordedVideoBlob = null;
+            videoChunks = [];
         }
     }
 
@@ -1514,6 +1780,58 @@ CHAT_PAGE = r"""
         return html;
     }
 
+    function createVideoNotePlayer(meta, msgId) {
+        if (!meta || !meta.file) {
+            return '<div style="font-size:12px; color:#f44336;">پیام ویدیویی در دسترس نیست</div>';
+        }
+        const mime = meta.mime || 'video/webm';
+        const html = `
+            <div class="video-note" data-video-note="${msgId}" onclick="toggleVideoNotePlay('${msgId}', '${meta.file}', '${mime}')">
+                <video id="vnote-${msgId}" playsinline preload="none"></video>
+                <div class="video-note-play">
+                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                </div>
+            </div>
+        `;
+        return html;
+    }
+
+    async function toggleVideoNotePlay(msgId, fileName, mime) {
+        const wrapper = document.querySelector(`.video-note[data-video-note="${msgId}"]`);
+        const video = document.getElementById('vnote-' + msgId);
+        if (!wrapper || !video) return;
+
+        if (!video.src) {
+            try {
+                const response = await fetch('/media/' + encodeURIComponent(fileName));
+                if (!response.ok) throw new Error('media fetch failed');
+                const encryptedBytes = await response.arrayBuffer();
+                const decryptedBytes = await decryptBinary(encryptedBytes);
+                const blobUrl = URL.createObjectURL(new Blob([decryptedBytes], { type: mime || 'video/webm' }));
+                video.src = blobUrl;
+            } catch (error) {
+                console.error('Video note decrypt failed:', error);
+                alert('بازگشایی پیام ویدیویی ناموفق بود');
+                return;
+            }
+        }
+
+        if (video.paused) {
+            document.querySelectorAll('.video-note video').forEach(v => {
+                if (v.id !== video.id && !v.paused) {
+                    v.pause();
+                    v.closest('.video-note')?.classList.remove('playing');
+                }
+            });
+            await video.play();
+            wrapper.classList.add('playing');
+        } else {
+            video.pause();
+            wrapper.classList.remove('playing');
+        }
+        video.onended = () => wrapper.classList.remove('playing');
+    }
+
     function toggleVoicePlay(msgId) {
         const audio = window['audio_' + msgId];
         if (!audio) return;
@@ -1639,7 +1957,7 @@ CHAT_PAGE = r"""
     function editMsg(id, isEdited) {
         const msgEl = document.getElementById('msg-' + id);
         if (!msgEl) return;
-        if (msgEl.querySelector('.voice-player')) return;
+        if (msgEl.querySelector('.voice-player') || msgEl.querySelector('.video-note')) return;
         
         const bodyDiv = msgEl.querySelector('div:not(.reply-area):not(.reaction):not(.footer-info):not(.msg-actions)');
         if (!bodyDiv) return;
@@ -1867,6 +2185,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
             elif u.path == '/get_messages':
                 self.handle_get_messages(u.query)
+            elif u.path.startswith('/media/'):
+                self.handle_get_media(u.path)
 
             else:
                 self.send_response(404)
@@ -1874,6 +2194,37 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 
         except Exception as e:
             logger.error(f"خطا در GET {self.path}: {e}")
+            self.send_response(500)
+            self.end_headers()
+
+    def handle_get_media(self, path):
+        """ارسال فایل‌های رمزنگاری‌شده پیام ویدیویی"""
+        uid = self.get_user_from_cookie()
+        if uid not in ("USER_A", "USER_B"):
+            self.send_response(401)
+            self.end_headers()
+            return
+        file_name = path.replace('/media/', '', 1)
+        if not file_name or '/' in file_name or '\\' in file_name:
+            self.send_response(400)
+            self.end_headers()
+            return
+        file_path = os.path.join(MEDIA_DIR, file_name)
+        if not os.path.isfile(file_path):
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            with open(file_path, 'rb') as media_file:
+                data = media_file.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception as e:
+            logger.error(f"خطا در ارسال فایل رسانه {file_name}: {e}")
             self.send_response(500)
             self.end_headers()
 
@@ -1909,7 +2260,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             for m in MESSAGES:
                 if m['timestamp'] > since or (m.get('updated') or 0) > since:
                     msg_dict = dict(m)
-                    if m['timestamp'] <= since and m.get('type') in ('voice', 'image'):
+                    if m['timestamp'] <= since and m.get('type') in ('voice', 'image', 'video_note'):
                         msg_dict.pop('data', None)
                     news.append(msg_dict)
             
@@ -1931,14 +2282,26 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             content_length = int(self.headers.get('Content-Length', 0))
-            raw = self.rfile.read(content_length).decode('utf-8')
+            raw_bytes = self.rfile.read(content_length)
+            parsed_url = urllib.parse.urlparse(self.path)
+
+            if parsed_url.path == '/upload_video_note':
+                uid = self.get_user_from_cookie()
+                if uid not in ("USER_A", "USER_B"):
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                self.handle_upload_video_note(uid, raw_bytes, parsed_url.query)
+                return
             
-            if self.path == '/login':
+            raw = raw_bytes.decode('utf-8')
+            
+            if parsed_url.path == '/login':
                 self.handle_login(raw)
                 return
             
             body = parse_json_safely(raw)
-            if not body and self.path != '/typing':
+            if not body and parsed_url.path != '/typing':
                 self.send_response(400)
                 self.end_headers()
                 return
@@ -1955,15 +2318,15 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             
-            if self.path == '/send_message':
+            if parsed_url.path == '/send_message':
                 self.handle_send_message(body)
-            elif self.path == '/delete_message':
+            elif parsed_url.path == '/delete_message':
                 self.handle_delete_message(body)
-            elif self.path == '/react_message':
+            elif parsed_url.path == '/react_message':
                 self.handle_react_message(body)
-            elif self.path == '/edit_message':
+            elif parsed_url.path == '/edit_message':
                 self.handle_edit_message(body)
-            elif self.path == '/typing':
+            elif parsed_url.path == '/typing':
                 self.handle_typing(body)
                 
         except Exception as e:
@@ -1988,6 +2351,54 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(303)
             self.send_header("Location", "/")
             self.end_headers()
+
+    def handle_upload_video_note(self, uid, encrypted_bytes, query):
+        """ذخیره پیام ویدیویی رمزنگاری‌شده به صورت فایل"""
+        if not encrypted_bytes or len(encrypted_bytes) < 20:
+            self.send_json_response({"error": "invalid_video_payload"}, 400)
+            return
+        if len(encrypted_bytes) > 10 * 1024 * 1024:
+            self.send_json_response({"error": "video_too_large"}, 400)
+            return
+
+        params = urllib.parse.parse_qs(query)
+        mime_type = params.get('mime', ['video/webm'])[0]
+        if not mime_type.startswith('video/') or not re.match(r'^[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+$', mime_type):
+            mime_type = 'video/webm'
+
+        file_id = hashlib.sha256(f"{uid}:{time.time()}:{len(encrypted_bytes)}".encode('utf-8')).hexdigest()[:24]
+        file_name = f"{file_id}.bin"
+        file_path = os.path.join(MEDIA_DIR, file_name)
+
+        try:
+            with open(file_path, 'wb') as media_file:
+                media_file.write(encrypted_bytes)
+        except Exception as e:
+            logger.error(f"خطا در ذخیره پیام ویدیویی: {e}")
+            self.send_json_response({"error": "video_save_failed"}, 500)
+            return
+
+        message = {
+            'id': str(time.time()),
+            'sender_id': uid,
+            'type': 'video_note',
+            'data': json.dumps({'kind': 'video_note', 'file': file_name, 'mime': mime_type}, ensure_ascii=False),
+            'timestamp': time.time(),
+            'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"),
+            'seen': False,
+            'react': None,
+            'reply_id': self.headers.get('X-Reply-Id') or None,
+            'reply_text': self.headers.get('X-Reply-Text') or None,
+            'deleted': False,
+            'edited': False,
+            'updated': None
+        }
+
+        with LOCKED:
+            MESSAGES.append(message)
+        save_message_to_db(message)
+
+        self.send_json_response({"ok": True, "id": message['id']}, 200)
 
     def handle_send_message(self, body):
         """پردازش ارسال پیام"""
@@ -2018,6 +2429,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         with LOCKED:
             for m in MESSAGES:
                 if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
+                    delete_video_note_file(m)
                     m['deleted'] = True
                     m['data'] = "-"
                     m['updated'] = time.time()
@@ -2055,7 +2467,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         with LOCKED:
             for m in MESSAGES:
                 if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
-                    if m.get('type') in ('image', 'voice'):
+                    if m.get('type') in ('image', 'voice', 'video_note'):
                         break
                     
                     m['data'] = body['data']
@@ -2082,6 +2494,7 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 if __name__ == "__main__":
     # مقداردهی اولیه دیتابیس
+    ensure_media_dir()
     init_database()
     load_messages_to_memory()
     

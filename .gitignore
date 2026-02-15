@@ -1,2 +1,3 @@
-chat_history.db
-chat_server.log
+*
+!s.py
+!.gitignore
