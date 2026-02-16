@@ -31,8 +31,8 @@ MAX_MESSAGES_IN_MEMORY = 500  # حداکثر تعداد پیام در حافظه
 MESSAGE_EXPIRY_HOURS = 24  # مدت زمان نگهداری پیام‌ها
 
 PASSWORD_TO_USER = {
-    "9604": "USER_A",
-    "2728": "USER_B",
+    "1111": "USER_A",
+    "2222": "USER_B",
 }
 
 DB_FILE = "chat_history.db"
