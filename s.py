@@ -283,6 +283,7 @@ LOGIN_PAGE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <meta name="theme-color" content="#eceff1">
     <title>ورود</title>
+    <link id="app-favicon" rel="icon" type="image/png">
 <style>
     * { box-sizing: border-box; }
 
@@ -430,6 +431,65 @@ LOGIN_PAGE = """
         </form>
     </div>
     <script>
+        function setLoginFavicon() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            const rounded = (x, y, w, h, r) => {
+                if (ctx.roundRect) {
+                    ctx.beginPath();
+                    ctx.roundRect(x, y, w, h, r);
+                    return;
+                }
+                const radius = Math.min(r, w / 2, h / 2);
+                ctx.beginPath();
+                ctx.moveTo(x + radius, y);
+                ctx.lineTo(x + w - radius, y);
+                ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+                ctx.lineTo(x + w, y + h - radius);
+                ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+                ctx.lineTo(x + radius, y + h);
+                ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+                ctx.lineTo(x, y + radius);
+                ctx.quadraticCurveTo(x, y, x + radius, y);
+                ctx.closePath();
+            };
+
+            const grad = ctx.createLinearGradient(0, 0, 64, 64);
+            grad.addColorStop(0, '#00a884');
+            grad.addColorStop(1, '#005c4b');
+            ctx.fillStyle = grad;
+            rounded(4, 4, 56, 56, 18);
+            ctx.fill();
+
+            ctx.fillStyle = '#ffffff';
+            rounded(13, 18, 38, 27, 9);
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.moveTo(25, 45);
+            ctx.lineTo(19, 53);
+            ctx.lineTo(20, 44);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#00a884';
+            [22, 32, 42].forEach((x) => {
+                ctx.beginPath();
+                ctx.arc(x, 31, 2.8, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            const favicon = document.getElementById('app-favicon') || document.createElement('link');
+            favicon.id = 'app-favicon';
+            favicon.rel = 'icon';
+            favicon.type = 'image/png';
+            favicon.href = canvas.toDataURL('image/png');
+            if (!favicon.parentNode) document.head.appendChild(favicon);
+        }
+
         function toggleTheme() {
             const currentTheme = document.documentElement.getAttribute('data-theme');
             const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
@@ -439,6 +499,7 @@ LOGIN_PAGE = """
         }
         
         // Set initial icon
+        setLoginFavicon();
         const currentTheme = document.documentElement.getAttribute('data-theme');
         document.querySelector('.theme-toggle').textContent = currentTheme === 'dark' ? '☀️' : '🌙';
     </script>
@@ -454,6 +515,7 @@ CHAT_PAGE = r"""
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>این‌چت</title>
+    <link id="app-favicon" rel="icon" type="image/png">
     <style>
         :root {
             --bg-color: #efe7dd;
@@ -1017,6 +1079,7 @@ CHAT_PAGE = r"""
             themeBtn.textContent = currentTheme === 'dark' ? '☀️' : '🌙';
         }
         updateKeyOverlayTheme(currentTheme);
+        updateFavicon();
     });
 
     let myId = "ME";
@@ -1025,6 +1088,112 @@ CHAT_PAGE = r"""
     let replyingTo = null;
     let editingTo = null;
     let autoScroll = true;
+    let unreadCount = 0;
+    let hasFetchedOnce = false;
+    const APP_TITLE = "این‌چت";
+
+    function roundRectPath(ctx, x, y, w, h, r) {
+        if (ctx.roundRect) {
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, r);
+            return;
+        }
+        const radius = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + radius, y);
+        ctx.lineTo(x + w - radius, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+        ctx.lineTo(x + w, y + h - radius);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+        ctx.lineTo(x + radius, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+        ctx.lineTo(x, y + radius);
+        ctx.quadraticCurveTo(x, y, x + radius, y);
+        ctx.closePath();
+    }
+
+    function buildFavicon(showUnreadDot = false) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 64;
+        canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return "";
+
+        const grad = ctx.createLinearGradient(0, 0, 64, 64);
+        grad.addColorStop(0, '#00a884');
+        grad.addColorStop(1, '#005c4b');
+        ctx.fillStyle = grad;
+        roundRectPath(ctx, 4, 4, 56, 56, 18);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
+        roundRectPath(ctx, 13, 18, 38, 27, 9);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.moveTo(25, 45);
+        ctx.lineTo(19, 53);
+        ctx.lineTo(20, 44);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = '#00a884';
+        [22, 32, 42].forEach((x) => {
+            ctx.beginPath();
+            ctx.arc(x, 31, 2.8, 0, Math.PI * 2);
+            ctx.fill();
+        });
+
+        if (showUnreadDot) {
+            ctx.fillStyle = '#f44336';
+            ctx.beginPath();
+            ctx.arc(51, 13, 10, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+
+        return canvas.toDataURL('image/png');
+    }
+
+    function getFaviconElement() {
+        let favicon = document.getElementById('app-favicon');
+        if (!favicon) {
+            favicon = document.querySelector("link[rel*='icon']");
+        }
+        if (!favicon) {
+            favicon = document.createElement('link');
+            favicon.rel = 'icon';
+            document.head.appendChild(favicon);
+        }
+        favicon.id = 'app-favicon';
+        favicon.type = 'image/png';
+        return favicon;
+    }
+
+    function updateFavicon() {
+        const favicon = getFaviconElement();
+        favicon.href = buildFavicon(unreadCount > 0);
+        const badgeText = unreadCount > 99 ? '99+' : String(unreadCount);
+        document.title = unreadCount > 0 ? `(${badgeText}) ${APP_TITLE}` : APP_TITLE;
+    }
+
+    function isWindowInactive() {
+        return document.hidden || !document.hasFocus();
+    }
+
+    function clearUnread() {
+        if (unreadCount === 0) return;
+        unreadCount = 0;
+        updateFavicon();
+    }
+
+    function onWindowActivityChanged() {
+        if (!isWindowInactive() && autoScroll) {
+            clearUnread();
+        }
+    }
 
     function updateAppHeight(){
         const vv = window.visualViewport;
@@ -1051,13 +1220,21 @@ CHAT_PAGE = r"""
         pollTimer = setInterval(fetchMessages, interval);
     }
 
+    function handleVisibilityChange() {
+        schedulePoll();
+        onWindowActivityChanged();
+    }
+
     function startChat() {
         let v = document.getElementById('kInp').value;
         if(!v) return;
         CHAT_KEY = v;
         document.getElementById('key-overlay').style.display = 'none';
+        updateFavicon();
         schedulePoll();
-        document.addEventListener('visibilitychange', schedulePoll);
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        window.addEventListener('focus', onWindowActivityChanged);
+        window.addEventListener('blur', onWindowActivityChanged);
         setTimeout(() => handleScroll(), 500);
     }
 
@@ -1232,15 +1409,23 @@ CHAT_PAGE = r"""
             
             if(d.messages.length > 0) {
                 let hasNew = false;
+                let unreadIncoming = 0;
                 for (const m of d.messages) {
                     if(m.timestamp > lastTime || m.updated) {
                         if(m.timestamp > lastTime && m.sender_id !== myId) {
                             playDing();
                             document.getElementById('typing-status').innerText = "";
+                            if (hasFetchedOnce && (isWindowInactive() || !autoScroll)) {
+                                unreadIncoming += 1;
+                            }
                         }
                         await render(m);
                         if(m.timestamp > lastTime) { lastTime = m.timestamp; hasNew = true; }
                     }
+                }
+                if (unreadIncoming > 0) {
+                    unreadCount += unreadIncoming;
+                    updateFavicon();
                 }
                 if(hasNew) {
                     if(autoScroll) {
@@ -1251,6 +1436,7 @@ CHAT_PAGE = r"""
                 }
                 setTimeout(() => handleScroll(), 100);
             }
+            hasFetchedOnce = true;
         } catch(e) {
             console.error('Fetch error:', e);
         }
@@ -1947,6 +2133,9 @@ CHAT_PAGE = r"""
         if (autoScroll) {
             document.getElementById('new-msg-bubble').style.display = 'none';
             scrollBtn.classList.remove('show');
+            if (!isWindowInactive()) {
+                clearUnread();
+            }
         } else {
             scrollBtn.classList.add('show');
         }
