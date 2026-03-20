@@ -1995,6 +1995,14 @@ CHAT_PAGE = r"""
                 const decryptedBytes = await decryptBinary(encryptedBytes);
                 const blobUrl = URL.createObjectURL(new Blob([decryptedBytes], { type: mime || 'video/webm' }));
                 video.src = blobUrl;
+
+                // ✅ صبر کن تا ویدیو واقعاً آماده پخش بشه
+                await new Promise((resolve, reject) => {
+                    video.oncanplay = resolve;
+                    video.onerror = reject;
+                    video.load(); // ← force load
+                });
+
             } catch (error) {
                 console.error('Video note decrypt failed:', error);
                 alert('بازگشایی پیام ویدیویی ناموفق بود');
@@ -2002,19 +2010,30 @@ CHAT_PAGE = r"""
             }
         }
 
-        if (video.paused) {
+        if (video.paused || video.ended) {
+            // توقف بقیه ویدیوها
             document.querySelectorAll('.video-note video').forEach(v => {
-                if (v.id !== video.id && !v.paused) {
+                if (!v.paused) {
                     v.pause();
                     v.closest('.video-note')?.classList.remove('playing');
                 }
             });
-            await video.play();
-            wrapper.classList.add('playing');
+
+            // ✅ play() رو داخل try/catch بگیر تا AbortError crash نکنه
+            try {
+                await video.play();
+                wrapper.classList.add('playing');
+            } catch (err) {
+                if (err.name !== 'AbortError') {
+                    console.error('Video play failed:', err);
+                }
+                // AbortError رو نادیده بگیر - مرورگر خودش resolve می‌کنه
+            }
         } else {
             video.pause();
             wrapper.classList.remove('playing');
         }
+
         video.onended = () => wrapper.classList.remove('playing');
     }
 
