@@ -8,7 +8,6 @@ import os
 import logging
 import sqlite3
 import hashlib
-import base64
 import re
 from datetime import datetime, timedelta
 from collections import deque
@@ -56,8 +55,8 @@ def ensure_media_dir():
     os.makedirs(MEDIA_DIR, exist_ok=True)
 
 
-def parse_video_note_data(data):
-    """استخراج اطلاعات فایل پیام ویدیویی از داده پیام"""
+def parse_media_file_data(data, expected_kind):
+    """استخراج اطلاعات فایل رسانه‌ای (ویس/ویدیو) از داده پیام"""
     if not data:
         return None
     try:
@@ -66,7 +65,7 @@ def parse_video_note_data(data):
         return None
     if not isinstance(parsed, dict):
         return None
-    if parsed.get('kind') != 'video_note':
+    if parsed.get('kind') != expected_kind:
         return None
     file_name = parsed.get('file')
     if not file_name or '/' in file_name or '\\' in file_name:
@@ -74,11 +73,13 @@ def parse_video_note_data(data):
     return parsed
 
 
-def delete_video_note_file(message):
-    """حذف فایل پیام ویدیویی مرتبط با پیام"""
-    if message.get('type') != 'video_note':
+def delete_media_file(message):
+    """حذف فایل رسانه‌ای مرتبط با پیام (ویس/ویدیو)"""
+    message_type = message.get('type')
+    if message_type not in ('voice', 'video_note'):
         return
-    media = parse_video_note_data(message.get('data'))
+    media_kind = 'voice' if message_type == 'voice' else 'video_note'
+    media = parse_media_file_data(message.get('data'), media_kind)
     if not media:
         return
     file_path = os.path.join(MEDIA_DIR, media['file'])
@@ -86,7 +87,7 @@ def delete_video_note_file(message):
         try:
             os.remove(file_path)
         except Exception as e:
-            logger.warning(f"خطا در حذف فایل پیام ویدیویی {file_path}: {e}")
+            logger.warning(f"خطا در حذف فایل رسانه‌ای {file_path}: {e}")
 
 
 # --- مدیریت دیتابیس SQLite ---
@@ -222,8 +223,8 @@ def cleanup_old_messages():
         cursor.execute('SELECT type, data FROM messages WHERE timestamp < ?', (expiry_time,))
         old_rows = cursor.fetchall()
         for row in old_rows:
-            if row['type'] == 'video_note':
-                delete_video_note_file(dict(row))
+            if row['type'] in ('voice', 'video_note'):
+                delete_media_file(dict(row))
         cursor.execute('DELETE FROM messages WHERE timestamp < ?', (expiry_time,))
         
         deleted_count = cursor.rowcount
@@ -1518,13 +1519,23 @@ CHAT_PAGE = r"""
 
         let decryptedData = "";
         let videoMeta = null;
-        if (m.type === 'video_note') {
+        let voiceMeta = null;
+        if (m.type === 'video_note' || m.type === 'voice') {
             try {
-                videoMeta = JSON.parse(m.data || '{}');
+                const parsedMeta = JSON.parse(m.data || '{}');
+                if (m.type === 'video_note' && parsedMeta?.kind === 'video_note' && parsedMeta?.file) {
+                    videoMeta = parsedMeta;
+                } else if (m.type === 'voice' && parsedMeta?.kind === 'voice' && parsedMeta?.file) {
+                    voiceMeta = parsedMeta;
+                }
             } catch (e) {
                 videoMeta = null;
+                voiceMeta = null;
             }
-        } else {
+        }
+        if (m.type === 'voice' && !voiceMeta) {
+            decryptedData = await dec(m.data);
+        } else if (m.type !== 'video_note' && m.type !== 'voice') {
             decryptedData = await dec(m.data);
         }
         
@@ -1583,7 +1594,7 @@ CHAT_PAGE = r"""
         if (m.type === 'image') {
             body = `<img src="${content}" style="max-width:100%; border-radius:12px;">`;
         } else if (m.type === 'voice') {
-            body = createVoicePlayer(content, m.id);
+            body = createVoicePlayer(voiceMeta || { legacySrc: content }, m.id);
         } else if (m.type === 'video_note') {
             body = createVideoNotePlayer(videoMeta, m.id);
         } else {
@@ -1878,38 +1889,34 @@ CHAT_PAGE = r"""
             audioChunks = [];
             return;
         }
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-            try {
-                const base64 = reader.result;
-                if (!base64 || base64.length < 50) return;
-                const encData = await enc(base64);
-                const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
-                await postAction('/send_message', {
-                    type: 'voice',
-                    data: encData,
-                    reply_id: replyingTo ? replyingTo.id : null,
-                    reply_text: encReplyText
-                });
-                cancelReply();
-                recordedBlob = null;
-                audioChunks = [];
-                setTimeout(() => scrollToBottom(), 100);
-            } catch(e) {
-                console.error('Error sending voice:', e);
-                alert('خطا در ارسال ویس');
-            } finally {
-                recordedBlob = null;
-                audioChunks = [];
-            }
-        };
-        reader.onerror = () => { recordedBlob = null; audioChunks = []; };
-        reader.readAsDataURL(recordedBlob);
+        try {
+            const encryptedBytes = await encryptBinary(await recordedBlob.arrayBuffer());
+            const encReplyText = replyingTo ? await enc(replyingTo.text) : '';
+            await fetch(`/upload_voice?mime=${encodeURIComponent(recordedBlob.type || 'audio/webm')}`, {
+                method: 'POST',
+                headers: {
+                    'X-Reply-Id': replyingTo ? replyingTo.id : '',
+                    'X-Reply-Text': encReplyText
+                },
+                body: new Blob([encryptedBytes], { type: 'application/octet-stream' })
+            });
+            cancelReply();
+            fetchMessages();
+            setTimeout(() => scrollToBottom(), 100);
+        } catch(e) {
+            console.error('Error sending voice:', e);
+            alert('خطا در ارسال ویس');
+        } finally {
+            recordedBlob = null;
+            audioChunks = [];
+        }
     }
 
     // --- Voice Player: waveform قابل کلیک، دکمه 1.5x ---
-    function createVoicePlayer(src, msgId) {
-        const audio = new Audio(src);
+    function createVoicePlayer(meta, msgId) {
+        const fileName = meta?.file || '';
+        const mime = meta?.mime || 'audio/webm';
+        const legacySrc = meta?.legacySrc || '';
         const bars = [];
         for (let i = 0; i < 25; i++) {
             bars.push(Math.random() * 20 + 8);
@@ -1918,7 +1925,7 @@ CHAT_PAGE = r"""
             `<div class="voice-bar" data-idx="${i}" style="height:${h}px"></div>`
         ).join('');
         const html = `
-            <div class="voice-player" data-msg="${msgId}">
+            <div class="voice-player" data-msg="${msgId}" data-file="${fileName}" data-mime="${mime}" data-legacy-src="${legacySrc}">
                 <button class="voice-play-btn" onclick="toggleVoicePlay('${msgId}')">
                     <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                     <svg class="pause-icon" style="display:none" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
@@ -1930,40 +1937,67 @@ CHAT_PAGE = r"""
                 </div>
             </div>
         `;
-        setTimeout(() => {
-            window['audio_' + msgId] = audio;
-            function updateDuration() {
-                const dur = audio.duration;
-                if (dur && isFinite(dur) && !isNaN(dur)) {
-                    const durSec = Math.floor(dur);
-                    const mins = Math.floor(durSec / 60);
-                    const secs = durSec % 60;
-                    const el = document.getElementById('vtime-' + msgId);
-                    if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-                }
-            }
-            audio.onloadedmetadata = updateDuration;
-            audio.ondurationchange = updateDuration;
-            audio.oncanplaythrough = updateDuration;
-            audio.ontimeupdate = () => updateVoiceProgress(msgId);
-            audio.onended = () => {
-                const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
-                if (player) {
-                    player.querySelector('.play-icon').style.display = 'block';
-                    player.querySelector('.pause-icon').style.display = 'none';
-                    player.querySelectorAll('.voice-bar').forEach(b => b.classList.remove('played'));
-                }
-                audio.currentTime = 0;
-                const dur = audio.duration;
-                if (dur && isFinite(dur)) {
-                    const mins = Math.floor(dur / 60);
-                    const secs = Math.floor(dur % 60);
-                    const el = document.getElementById('vtime-' + msgId);
-                    if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-                }
-            };
-        }, 0);
         return html;
+    }
+
+    function setupVoiceAudio(msgId, audio) {
+        function updateDuration() {
+            const dur = audio.duration;
+            if (dur && isFinite(dur) && !isNaN(dur)) {
+                const durSec = Math.floor(dur);
+                const mins = Math.floor(durSec / 60);
+                const secs = durSec % 60;
+                const el = document.getElementById('vtime-' + msgId);
+                if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+            }
+        }
+        audio.onloadedmetadata = updateDuration;
+        audio.ondurationchange = updateDuration;
+        audio.oncanplaythrough = updateDuration;
+        audio.ontimeupdate = () => updateVoiceProgress(msgId);
+        audio.onended = () => {
+            const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
+            if (player) {
+                player.querySelector('.play-icon').style.display = 'block';
+                player.querySelector('.pause-icon').style.display = 'none';
+                player.querySelectorAll('.voice-bar').forEach(b => b.classList.remove('played'));
+            }
+            audio.currentTime = 0;
+            const dur = audio.duration;
+            if (dur && isFinite(dur)) {
+                const mins = Math.floor(dur / 60);
+                const secs = Math.floor(dur % 60);
+                const el = document.getElementById('vtime-' + msgId);
+                if (el) el.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+            }
+        };
+    }
+
+    async function ensureVoiceAudio(msgId) {
+        const existing = window['audio_' + msgId];
+        if (existing) return existing;
+
+        const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
+        if (!player) return null;
+
+        const legacySrc = player.dataset.legacySrc || '';
+        let src = legacySrc;
+        if (!src) {
+            const fileName = player.dataset.file || '';
+            const mime = player.dataset.mime || 'audio/webm';
+            if (!fileName) return null;
+            const response = await fetch('/media/' + encodeURIComponent(fileName));
+            if (!response.ok) throw new Error('voice media fetch failed');
+            const encryptedBytes = await response.arrayBuffer();
+            const decryptedBytes = await decryptBinary(encryptedBytes);
+            src = URL.createObjectURL(new Blob([decryptedBytes], { type: mime }));
+            player.dataset.blobUrl = src;
+        }
+
+        const audio = new Audio(src);
+        window['audio_' + msgId] = audio;
+        setupVoiceAudio(msgId, audio);
+        return audio;
     }
 
     function createVideoNotePlayer(meta, msgId) {
@@ -2037,8 +2071,15 @@ CHAT_PAGE = r"""
         video.onended = () => wrapper.classList.remove('playing');
     }
 
-    function toggleVoicePlay(msgId) {
-        const audio = window['audio_' + msgId];
+    async function toggleVoicePlay(msgId) {
+        let audio;
+        try {
+            audio = await ensureVoiceAudio(msgId);
+        } catch (error) {
+            console.error('Voice decrypt failed:', error);
+            alert('بازگشایی پیام صوتی ناموفق بود');
+            return;
+        }
         if (!audio) return;
         const player = document.querySelector(`.voice-player[data-msg="${msgId}"]`);
         if (!player) return;
@@ -2406,7 +2447,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def handle_get_media(self, path):
-        """ارسال فایل‌های رمزنگاری‌شده پیام ویدیویی"""
+        """ارسال فایل‌های رمزنگاری‌شده رسانه (ویس/ویدیو)"""
         uid = self.get_user_from_cookie()
         if uid not in ("USER_A", "USER_B"):
             self.send_response(401)
@@ -2500,6 +2541,14 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     return
                 self.handle_upload_video_note(uid, raw_bytes, parsed_url.query)
+                return
+            if parsed_url.path == '/upload_voice':
+                uid = self.get_user_from_cookie()
+                if uid not in ("USER_A", "USER_B"):
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                self.handle_upload_voice(uid, raw_bytes, parsed_url.query)
                 return
             
             raw = raw_bytes.decode('utf-8')
@@ -2608,6 +2657,54 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         self.send_json_response({"ok": True, "id": message['id']}, 200)
 
+    def handle_upload_voice(self, uid, encrypted_bytes, query):
+        """ذخیره پیام صوتی رمزنگاری‌شده به صورت فایل"""
+        if not encrypted_bytes or len(encrypted_bytes) < 20:
+            self.send_json_response({"error": "invalid_voice_payload"}, 400)
+            return
+        if len(encrypted_bytes) > 1024 * 1024:
+            self.send_json_response({"error": "voice_too_large"}, 400)
+            return
+
+        params = urllib.parse.parse_qs(query)
+        mime_type = params.get('mime', ['audio/webm'])[0]
+        if not mime_type.startswith('audio/') or not re.match(r'^[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+$', mime_type):
+            mime_type = 'audio/webm'
+
+        file_id = hashlib.sha256(f"{uid}:{time.time()}:{len(encrypted_bytes)}".encode('utf-8')).hexdigest()[:24]
+        file_name = f"{file_id}.bin"
+        file_path = os.path.join(MEDIA_DIR, file_name)
+
+        try:
+            with open(file_path, 'wb') as media_file:
+                media_file.write(encrypted_bytes)
+        except Exception as e:
+            logger.error(f"خطا در ذخیره پیام صوتی: {e}")
+            self.send_json_response({"error": "voice_save_failed"}, 500)
+            return
+
+        message = {
+            'id': str(time.time()),
+            'sender_id': uid,
+            'type': 'voice',
+            'data': json.dumps({'kind': 'voice', 'file': file_name, 'mime': mime_type}, ensure_ascii=False),
+            'timestamp': time.time(),
+            'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"),
+            'seen': False,
+            'react': None,
+            'reply_id': self.headers.get('X-Reply-Id') or None,
+            'reply_text': self.headers.get('X-Reply-Text') or None,
+            'deleted': False,
+            'edited': False,
+            'updated': None
+        }
+
+        with LOCKED:
+            MESSAGES.append(message)
+        save_message_to_db(message)
+
+        self.send_json_response({"ok": True, "id": message['id']}, 200)
+
     def handle_send_message(self, body):
         """پردازش ارسال پیام"""
         message = {
@@ -2637,7 +2734,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         with LOCKED:
             for m in MESSAGES:
                 if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
-                    delete_video_note_file(m)
+                    delete_media_file(m)
                     m['deleted'] = True
                     m['data'] = "-"
                     m['updated'] = time.time()
