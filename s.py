@@ -1090,6 +1090,16 @@ CHAT_PAGE = r"""
             from { opacity: 0; bottom: calc(var(--bubble-bottom, 85px) - 15px); }
             to   { opacity: 1; bottom: var(--bubble-bottom, 85px); }
         }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .spinner-icon {
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+        }
 
     </style>
     <script>
@@ -2805,7 +2815,7 @@ CHAT_PAGE = r"""
         const downloadName = rawName.replace(/\\/g, '_').replace(/\//g, '_').replace(/'/g, "\\'");
         const emoji = getFileEmoji(rawName, mime);
         return `
-            <div class="file-card" onclick="downloadAttachment('${msgId}', '${fileName}', '${mime}', '${downloadName}')">
+            <div class="file-card" onclick="downloadAttachment(this, '${msgId}', '${fileName}', '${mime}', '${downloadName}')">
                 <div class="file-card-icon">${emoji}</div>
                 <div class="file-card-body">
                     <div class="file-card-name">${name}</div>
@@ -2816,7 +2826,17 @@ CHAT_PAGE = r"""
         `;
     }
 
-    async function downloadAttachment(msgId, fileName, mime, fileDisplayName) {
+    const spinnerSvg = `
+    <svg class="spinner-icon" viewBox="0 0 50 50">
+        <circle cx="25" cy="25" r="20" fill="none" stroke="currentColor" stroke-width="5" stroke-dasharray="31.415, 31.415" stroke-linecap="round"></circle>
+    </svg>`;
+
+    async function downloadAttachment(cardElement, msgId, fileName, mime, fileDisplayName) {
+        const iconElement = cardElement.querySelector('.file-card-icon');
+        const originalIcon = iconElement.innerHTML;
+        
+        // تغییر آیکون به لودینگ 
+        iconElement.innerHTML = spinnerSvg; 
         try {
             const response = await fetch('/media/' + encodeURIComponent(fileName));
             if (!response.ok) throw new Error('file fetch failed');
@@ -2834,6 +2854,11 @@ CHAT_PAGE = r"""
         } catch (error) {
             console.error('File download failed:', error);
             alert('دانلود فایل ناموفق بود');
+        } finally {
+            // برگرداندن آیکون به حالت اولیه بعد از اتمام فرآیند دانلود
+            if (iconElement) {
+                iconElement.innerHTML = originalIcon;
+            }
         }
     }
 
