@@ -30,8 +30,8 @@ MAX_MESSAGES_IN_MEMORY = 500  # حداکثر تعداد پیام در حافظه
 MESSAGE_EXPIRY_HOURS = 24  # مدت زمان نگهداری پیام‌ها
 
 PASSWORD_TO_USER = {
-    "1111": "USER_A",
-    "2222": "USER_B",
+    "2728": "USER_A",
+    "9604": "USER_B",
 }
 
 DB_FILE = "chat_history.db"
@@ -1624,6 +1624,10 @@ CHAT_PAGE = r"""
     }
 
     function cancelEdit(keepFocus=false) {
+        if (!editingTo) {
+            if (keepFocus) document.getElementById('msgInput').focus({preventScroll:true});
+            return;
+        }
         editingTo = null;
         document.getElementById('edit-preview').style.display = 'none';
         const i = document.getElementById('msgInput');
