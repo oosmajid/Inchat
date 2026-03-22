@@ -1081,6 +1081,11 @@ CHAT_PAGE = r"""
         }
         updateKeyOverlayTheme(currentTheme);
         updateFavicon();
+
+        if (!SHOW_MEDIA_BUTTONS) {
+            document.getElementById('mic-btn').style.display = 'none';
+            document.getElementById('video-note-btn').style.display = 'none';
+        }
     });
 
     let myId = "ME";
@@ -1092,6 +1097,9 @@ CHAT_PAGE = r"""
     let unreadCount = 0;
     let hasFetchedOnce = false;
     const APP_TITLE = "این‌چت";
+
+    // ── تنظیم نمایش دکمه‌های ویس و ویدیومسیج ──────────────────────────
+    const SHOW_MEDIA_BUTTONS = false;  // false = مخفی | true = نمایش
 
     function roundRectPath(ctx, x, y, w, h, r) {
         if (ctx.roundRect) {
