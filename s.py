@@ -55,8 +55,8 @@ def ensure_media_dir():
     os.makedirs(MEDIA_DIR, exist_ok=True)
 
 
-def parse_media_file_data(data, expected_kind):
-    """استخراج اطلاعات فایل رسانه‌ای (ویس/ویدیو) از داده پیام"""
+def parse_media_file_data(data, expected_kind=None):
+    """استخراج اطلاعات فایل رسانه‌ای از داده پیام"""
     if not data:
         return None
     try:
@@ -65,8 +65,12 @@ def parse_media_file_data(data, expected_kind):
         return None
     if not isinstance(parsed, dict):
         return None
-    if parsed.get('kind') != expected_kind:
-        return None
+    if expected_kind is not None:
+        if isinstance(expected_kind, (tuple, list, set)):
+            if parsed.get('kind') not in expected_kind:
+                return None
+        elif parsed.get('kind') != expected_kind:
+            return None
     file_name = parsed.get('file')
     if not file_name or '/' in file_name or '\\' in file_name:
         return None
@@ -74,11 +78,11 @@ def parse_media_file_data(data, expected_kind):
 
 
 def delete_media_file(message):
-    """حذف فایل رسانه‌ای مرتبط با پیام (ویس/ویدیو)"""
+    """حذف فایل رسانه‌ای مرتبط با پیام"""
     message_type = message.get('type')
-    if message_type not in ('voice', 'video_note'):
+    if message_type not in ('voice', 'video_note', 'file'):
         return
-    media_kind = 'voice' if message_type == 'voice' else 'video_note'
+    media_kind = 'voice' if message_type == 'voice' else ('video_note' if message_type == 'video_note' else 'file')
     media = parse_media_file_data(message.get('data'), media_kind)
     if not media:
         return
@@ -223,7 +227,7 @@ def cleanup_old_messages():
         cursor.execute('SELECT type, data FROM messages WHERE timestamp < ?', (expiry_time,))
         old_rows = cursor.fetchall()
         for row in old_rows:
-            if row['type'] in ('voice', 'video_note'):
+            if row['type'] in ('voice', 'video_note', 'file'):
                 delete_media_file(dict(row))
         cursor.execute('DELETE FROM messages WHERE timestamp < ?', (expiry_time,))
         
@@ -782,6 +786,53 @@ CHAT_PAGE = r"""
         }
         .voice-speed:hover { background: var(--send-icon-fill, #00a884); }
         .voice-speed.active { background: var(--send-icon-fill, #00a884); }
+        .file-card {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 220px;
+            max-width: 300px;
+            padding: 10px 12px;
+            background: var(--reply-area-bg, rgba(0,0,0,0.04));
+            border-radius: 14px;
+            cursor: pointer;
+        }
+        .file-card-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            background: var(--send-icon-fill, #00a884);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+        .file-card-body {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .file-card-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-color);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .file-card-meta {
+            font-size: 11px;
+            color: var(--secondary-text, #54656f);
+        }
+        .file-card-action {
+            font-size: 11px;
+            color: var(--send-icon-fill, #00a884);
+            font-weight: 700;
+        }
 
         .video-note {
             width: 168px;
@@ -1018,10 +1069,10 @@ CHAT_PAGE = r"""
     <button class="icon-btn mic-btn" id="mic-btn" onpointerdown="event.preventDefault();" onclick="toggleRecording()">
         <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
     </button>
-    <button class="icon-btn" onclick="document.getElementById('fInp').click()">
+    <button class="icon-btn" onclick="document.getElementById('fInp').click()" title="ارسال فایل">
         <svg viewBox="0 0 24 24"><path d="M19 7v2.99s-1.99.01-2 0V7h-3s.01-1.99 0-2h3V2h2v3h3v2h-3zm-3 4V8h-3V5H5c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-8h-3zM5 19l3-4 2 3 3-4 4 5H5z"/></svg>
     </button>
-    <input type="file" id="fInp" hidden accept="image/*" onchange="sendImg(this)">
+    <input type="file" id="fInp" hidden onchange="sendAttachment(this)">
 </div>
 <div id="copy-bubble">✓ کپی شد</div>
 <div id="reaction-menu" class="reaction-menu">
@@ -1513,24 +1564,24 @@ CHAT_PAGE = r"""
         div.id = 'msg-' + m.id;
         div.className = 'msg ' + (m.sender_id === myId ? 'sent' : 'received');
 
-        if (old && (m.type === 'voice' || m.type === 'image' || m.type === 'video_note')) {
+        if (old && (m.type === 'voice' || m.type === 'image' || m.type === 'video_note' || m.type === 'file')) {
             var liteReplyText = m.reply_text ? await dec(m.reply_text) : '';
             var liteReply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${liteReplyText}</div>` : '';
             var liteReact = m.react ? `<div class="reaction">${m.react}</div>` : '';
             var liteSeen = (m.sender_id === myId && m.seen) ? '<span class="seen-status">✓✓</span>' : (m.sender_id === myId ? '✓' : '');
             var liteEditedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
             var liteFooter = `<div class="footer-info">${liteEditedIcon}<span>${m.time}</span> ${liteSeen}</div>`;
-            var liteReplyLabel = m.type === 'image' ? 'تصویر' : (m.type === 'video_note' ? 'پیام ویدیویی' : 'پیام صوتی');
+            var liteReplyLabel = m.type === 'image' ? 'تصویر' : (m.type === 'video_note' ? 'پیام ویدیویی' : (m.type === 'file' ? 'فایل' : 'پیام صوتی'));
             var liteActions = `<div class="msg-actions">
                 ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
-                ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' && m.type !== 'video_note' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+                ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' && m.type !== 'video_note' && m.type !== 'file' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
                 <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${liteReplyLabel}')">پاسخ</span>
             </div>`;
             var replyEl = old.querySelector('.reply-area');
             if (liteReply) {
                 if (replyEl) replyEl.outerHTML = liteReply;
                 else {
-                    var bodyRef = old.querySelector('.voice-player') || old.querySelector('.video-note') || old.querySelector('img');
+                    var bodyRef = old.querySelector('.voice-player') || old.querySelector('.video-note') || old.querySelector('.file-card') || old.querySelector('img');
                     if (bodyRef) bodyRef.insertAdjacentHTML('beforebegin', liteReply);
                 }
             } else if (replyEl) replyEl.remove();
@@ -1538,7 +1589,7 @@ CHAT_PAGE = r"""
             if (liteReact) {
                 if (reactEl) reactEl.outerHTML = liteReact;
                 else {
-                    var bodyRef2 = old.querySelector('.voice-player') || old.querySelector('.video-note') || old.querySelector('img');
+                    var bodyRef2 = old.querySelector('.voice-player') || old.querySelector('.video-note') || old.querySelector('.file-card') || old.querySelector('img');
                     if (bodyRef2) bodyRef2.insertAdjacentHTML('afterend', liteReact);
                 }
             } else if (reactEl) reactEl.remove();
@@ -1553,7 +1604,7 @@ CHAT_PAGE = r"""
         if (m.sender_id !== myId) {
             div.onclick = (e) => {
                 // جلوگیری از باز شدن منو روی لینک، عکس، اکشن‌ها یا reply-area
-                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area') || e.target.closest('.voice-player') || e.target.closest('.video-note')) {
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area') || e.target.closest('.voice-player') || e.target.closest('.video-note') || e.target.closest('.file-card')) {
                     return;
                 }
                 if (longPressHappened) {
@@ -1572,28 +1623,32 @@ CHAT_PAGE = r"""
         let decryptedData = "";
         let videoMeta = null;
         let voiceMeta = null;
-        if (m.type === 'video_note' || m.type === 'voice') {
+        let fileMeta = null;
+        if (m.type === 'video_note' || m.type === 'voice' || m.type === 'file') {
             try {
                 const parsedMeta = JSON.parse(m.data || '{}');
                 if (m.type === 'video_note' && parsedMeta?.kind === 'video_note' && parsedMeta?.file) {
                     videoMeta = parsedMeta;
                 } else if (m.type === 'voice' && parsedMeta?.kind === 'voice' && parsedMeta?.file) {
                     voiceMeta = parsedMeta;
+                } else if (m.type === 'file' && parsedMeta?.kind === 'file' && parsedMeta?.file) {
+                    fileMeta = parsedMeta;
                 }
             } catch (e) {
                 videoMeta = null;
                 voiceMeta = null;
+                fileMeta = null;
             }
         }
         if (m.type === 'voice' && !voiceMeta) {
             decryptedData = await dec(m.data);
-        } else if (m.type !== 'video_note' && m.type !== 'voice') {
+        } else if (m.type !== 'video_note' && m.type !== 'voice' && m.type !== 'file') {
             decryptedData = await dec(m.data);
         }
         
         div.addEventListener('touchstart', (e) => {
             if (e.target && (e.target.closest('img'))) return;
-            if (m.type === 'image' || m.type === 'voice' || m.type === 'video_note') return;
+            if (m.type === 'image' || m.type === 'voice' || m.type === 'video_note' || m.type === 'file') return;
             longPressHappened = false;
             pressTimer = setTimeout(async () => {
                 longPressHappened = true;
@@ -1638,8 +1693,8 @@ CHAT_PAGE = r"""
         
         let actions = `<div class="msg-actions">
             ${m.sender_id === myId ? `<span onpointerdown="event.preventDefault();" onclick="deleteMsg('${m.id}')">حذف</span>` : ''}
-            ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' && m.type !== 'video_note' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
-            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : m.type === 'voice' ? 'پیام صوتی' : m.type === 'video_note' ? 'پیام ویدیویی' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
+            ${m.sender_id === myId && m.type !== 'image' && m.type !== 'voice' && m.type !== 'video_note' && m.type !== 'file' ? `<span onpointerdown="event.preventDefault();" onclick="editMsg('${m.id}', ${m.edited ? 'true' : 'false'})">ویرایش</span>` : ''}
+            <span onpointerdown="event.preventDefault();" onclick="setReply('${m.id}', '${m.type === 'image' ? 'تصویر' : m.type === 'voice' ? 'پیام صوتی' : m.type === 'video_note' ? 'پیام ویدیویی' : m.type === 'file' ? 'فایل' : content.replace(/'/g, "\\'").replace(/\n/g, ' ').replace(/\s+/g, ' ').trim().substring(0,100)}')">پاسخ</span>
         </div>`;
 
         let body;
@@ -1649,6 +1704,8 @@ CHAT_PAGE = r"""
             body = createVoicePlayer(voiceMeta || { legacySrc: content }, m.id);
         } else if (m.type === 'video_note') {
             body = createVideoNotePlayer(videoMeta, m.id);
+        } else if (m.type === 'file') {
+            body = createFileAttachment(fileMeta, m.id);
         } else {
             body = `<div>${linkify(content)}</div>`;
         }
@@ -1752,6 +1809,69 @@ CHAT_PAGE = r"""
         };
 
         img.src = URL.createObjectURL(file);
+    }
+
+    function formatFileSize(bytes) {
+        if (!bytes || bytes < 1024) return `${bytes || 0} بایت`;
+        if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} کیلوبایت`;
+        if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} مگابایت`;
+        return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} گیگابایت`;
+    }
+
+    function getFileEmoji(fileName, mimeType) {
+        const lowerName = (fileName || '').toLowerCase();
+        const mime = mimeType || '';
+        if (mime.startsWith('audio/')) return '🎵';
+        if (mime.startsWith('video/')) return '🎬';
+        if (mime.includes('pdf') || lowerName.endsWith('.pdf')) return '📄';
+        if (mime.includes('zip') || mime.includes('rar') || lowerName.endsWith('.zip') || lowerName.endsWith('.rar') || lowerName.endsWith('.7z')) return '🗜️';
+        if (mime.includes('word') || lowerName.endsWith('.doc') || lowerName.endsWith('.docx')) return '📝';
+        if (mime.includes('excel') || lowerName.endsWith('.xls') || lowerName.endsWith('.xlsx')) return '📊';
+        return '📎';
+    }
+
+    async function sendAttachment(input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        try {
+            if (file.type && file.type.startsWith('image/')) {
+                await sendImg(input);
+                return;
+            }
+
+            if (file.size > 100 * 1024 * 1024) {
+                alert('حجم فایل بیش از حد مجاز است (حداکثر 100 مگابایت)');
+                return;
+            }
+
+            const encryptedBytes = await encryptBinary(await file.arrayBuffer());
+            const encReplyText = replyingTo ? await enc(replyingTo.text) : '';
+            const params = new URLSearchParams({
+                mime: file.type || 'application/octet-stream',
+                name: file.name || 'file',
+                size: String(file.size || 0)
+            });
+
+            const response = await fetch(`/upload_file?${params.toString()}`, {
+                method: 'POST',
+                headers: {
+                    'X-Reply-Id': replyingTo ? replyingTo.id : '',
+                    'X-Reply-Text': encReplyText
+                },
+                body: new Blob([encryptedBytes], { type: 'application/octet-stream' })
+            });
+            if (!response.ok) throw new Error('file upload failed');
+
+            cancelReply();
+            fetchMessages();
+            setTimeout(() => scrollToBottom(), 100);
+        } catch (error) {
+            console.error('Error sending file:', error);
+            alert('ارسال فایل ناموفق بود');
+        } finally {
+            input.value = "";
+        }
     }
 
     // --- Voice Recording ---
@@ -2072,6 +2192,50 @@ CHAT_PAGE = r"""
         return html;
     }
 
+    function createFileAttachment(meta, msgId) {
+        if (!meta || !meta.file) {
+            return '<div style="font-size:12px; color:#f44336;">فایل در دسترس نیست</div>';
+        }
+        const rawName = meta.name || 'فایل';
+        const name = rawName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const mime = (meta.mime || 'application/octet-stream').replace(/'/g, '&#39;');
+        const fileName = (meta.file || '').replace(/'/g, '&#39;');
+        const sizeLabel = formatFileSize(Number(meta.size || 0));
+        const downloadName = rawName.replace(/\\/g, '_').replace(/\//g, '_').replace(/'/g, "\\'");
+        const emoji = getFileEmoji(rawName, mime);
+        return `
+            <div class="file-card" onclick="downloadAttachment('${msgId}', '${fileName}', '${mime}', '${downloadName}')">
+                <div class="file-card-icon">${emoji}</div>
+                <div class="file-card-body">
+                    <div class="file-card-name">${name}</div>
+                    <div class="file-card-meta">${sizeLabel}</div>
+                    <div class="file-card-action">دانلود فایل</div>
+                </div>
+            </div>
+        `;
+    }
+
+    async function downloadAttachment(msgId, fileName, mime, fileDisplayName) {
+        try {
+            const response = await fetch('/media/' + encodeURIComponent(fileName));
+            if (!response.ok) throw new Error('file fetch failed');
+            const encryptedBytes = await response.arrayBuffer();
+            const decryptedBytes = await decryptBinary(encryptedBytes);
+            const blob = new Blob([decryptedBytes], { type: mime || 'application/octet-stream' });
+            const blobUrl = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = blobUrl;
+            link.download = fileDisplayName || 'download';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+        } catch (error) {
+            console.error('File download failed:', error);
+            alert('دانلود فایل ناموفق بود');
+        }
+    }
+
     async function toggleVideoNotePlay(msgId, fileName, mime) {
         const wrapper = document.querySelector(`.video-note[data-video-note="${msgId}"]`);
         const video = document.getElementById('vnote-' + msgId);
@@ -2262,7 +2426,7 @@ CHAT_PAGE = r"""
     function editMsg(id, isEdited) {
         const msgEl = document.getElementById('msg-' + id);
         if (!msgEl) return;
-        if (msgEl.querySelector('.voice-player') || msgEl.querySelector('.video-note')) return;
+        if (msgEl.querySelector('.voice-player') || msgEl.querySelector('.video-note') || msgEl.querySelector('.file-card')) return;
         
         const bodyDiv = msgEl.querySelector('div:not(.reply-area):not(.reaction):not(.footer-info):not(.msg-actions)');
         if (!bodyDiv) return;
@@ -2565,7 +2729,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             for m in MESSAGES:
                 if m['timestamp'] > since or (m.get('updated') or 0) > since:
                     msg_dict = dict(m)
-                    if m['timestamp'] <= since and m.get('type') in ('voice', 'image', 'video_note'):
+                    if m['timestamp'] <= since and m.get('type') in ('voice', 'image', 'video_note', 'file'):
                         msg_dict.pop('data', None)
                     news.append(msg_dict)
             
@@ -2605,6 +2769,14 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     return
                 self.handle_upload_voice(uid, raw_bytes, parsed_url.query)
+                return
+            if parsed_url.path == '/upload_file':
+                uid = self.get_user_from_cookie()
+                if uid not in ("USER_A", "USER_B"):
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                self.handle_upload_file(uid, raw_bytes, parsed_url.query)
                 return
             
             raw = raw_bytes.decode('utf-8')
@@ -2761,6 +2933,72 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 
         self.send_json_response({"ok": True, "id": message['id']}, 200)
 
+    def handle_upload_file(self, uid, encrypted_bytes, query):
+        """ذخیره فایل رمزنگاری‌شده به صورت فایل"""
+        if not encrypted_bytes or len(encrypted_bytes) < 20:
+            self.send_json_response({"error": "invalid_file_payload"}, 400)
+            return
+        if len(encrypted_bytes) > 20 * 1024 * 1024:
+            self.send_json_response({"error": "file_too_large"}, 400)
+            return
+
+        params = urllib.parse.parse_qs(query)
+        mime_type = params.get('mime', ['application/octet-stream'])[0]
+        original_name = params.get('name', ['file'])[0]
+        try:
+            file_size = int(params.get('size', ['0'])[0])
+        except Exception:
+            file_size = 0
+
+        if not re.match(r'^[a-zA-Z0-9.+-]+/[a-zA-Z0-9.+-]+$', mime_type or ''):
+            mime_type = 'application/octet-stream'
+
+        original_name = os.path.basename(original_name or 'file').strip() or 'file'
+        original_name = re.sub(r'[\x00-\x1f\x7f]+', '', original_name)
+        if len(original_name) > 180:
+            original_name = original_name[:180]
+        file_size = max(0, file_size)
+
+        file_id = hashlib.sha256(f"{uid}:{time.time()}:{len(encrypted_bytes)}:{original_name}".encode('utf-8')).hexdigest()[:24]
+        file_name = f"{file_id}.bin"
+        file_path = os.path.join(MEDIA_DIR, file_name)
+
+        try:
+            with open(file_path, 'wb') as media_file:
+                media_file.write(encrypted_bytes)
+        except Exception as e:
+            logger.error(f"خطا در ذخیره فایل: {e}")
+            self.send_json_response({"error": "file_save_failed"}, 500)
+            return
+
+        message = {
+            'id': str(time.time()),
+            'sender_id': uid,
+            'type': 'file',
+            'data': json.dumps({
+                'kind': 'file',
+                'file': file_name,
+                'mime': mime_type,
+                'name': original_name,
+                'size': file_size
+            }, ensure_ascii=False),
+            'timestamp': time.time(),
+            'time': (datetime.utcnow() + timedelta(hours=3, minutes=30)).strftime("%H:%M"),
+            'seen': False,
+            'react': None,
+            'reply_id': self.headers.get('X-Reply-Id') or None,
+            'reply_text': self.headers.get('X-Reply-Text') or None,
+            'deleted': False,
+            'edited': False,
+            'updated': None
+        }
+
+        with LOCKED:
+            MESSAGES.append(message)
+        save_message_to_db(message)
+
+        self.send_json_response({"ok": True, "id": message['id']}, 200)
+
     def handle_send_message(self, body):
         """پردازش ارسال پیام"""
         message = {
@@ -2828,7 +3066,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         with LOCKED:
             for m in MESSAGES:
                 if m['id'] == body['id'] and m['sender_id'] == body['u_id']:
-                    if m.get('type') in ('image', 'voice', 'video_note'):
+                    if m.get('type') in ('image', 'voice', 'video_note', 'file'):
                         break
                     
                     m['data'] = body['data']
