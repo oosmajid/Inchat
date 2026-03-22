@@ -1828,43 +1828,36 @@ CHAT_PAGE = r"""
     }
 
     function showComposerContextMenu(clientX, clientY) {
-        if (!hasMeaningfulSelection()) {
-            hideComposerContextMenu();
-            return;
-        }
-        if (composerMenuCloseHandler) {
-            hideComposerContextMenu();
-        }
         const menu = getComposerContextMenu();
         if (!menu) return;
+
         menu.style.visibility = 'hidden';
         menu.style.display = 'flex';
         menu.classList.add('show');
-        const rect = menu.getBoundingClientRect();
+
+        const menuRect = menu.getBoundingClientRect();
+        const menuWidth = menuRect.width || 200;
+        const menuHeight = menuRect.height || 40;
         const padding = 10;
+
         let left = clientX;
-        let top = clientY + 8;
-        if (left + rect.width > window.innerWidth - padding) {
-            left = window.innerWidth - rect.width - padding;
+        
+        // تغییر مهم اینجاست: قرار دادن منو در بالای مختصات Y با در نظر گرفتن یک فاصله (مثلا 15 پیکسل)
+        let top = clientY - menuHeight - 15; 
+
+        if (left + menuWidth + padding > window.innerWidth) {
+            left = window.innerWidth - menuWidth - padding;
         }
         if (left < padding) left = padding;
-        if (top + rect.height > window.innerHeight - padding) {
-            top = clientY - rect.height - 8;
+
+        // اگر محاسبه باعث شد منو از بالای صفحه خارج شود (top منفی شود)، آن را به پایین نقطه لمس منتقل کن
+        if (top < padding) {
+            top = clientY + 15; 
         }
-        if (top < padding) top = padding;
+
         menu.style.left = left + 'px';
         menu.style.top = top + 'px';
         menu.style.visibility = 'visible';
-        composerMenuCloseHandler = (event) => {
-            if (event && menu.contains(event.target)) return;
-            hideComposerContextMenu();
-        };
-        setTimeout(() => {
-            if (!composerMenuCloseHandler) return;
-            document.addEventListener('mousedown', composerMenuCloseHandler);
-            document.addEventListener('scroll', composerMenuCloseHandler, true);
-            window.addEventListener('resize', composerMenuCloseHandler);
-        }, 0);
     }
 
     function runComposerMenuAction(action) {
