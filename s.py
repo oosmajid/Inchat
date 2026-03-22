@@ -704,7 +704,93 @@ CHAT_PAGE = r"""
         /* Input Area Material */
         #input-container { background: var(--input-container-bg); padding: 8px 16px; display: flex; align-items: flex-end; gap: 10px; border-top: 1px solid var(--input-border); position: sticky; bottom: 0; z-index: 20; transition: background 0.3s, border-color 0.3s; }
 
-        #msgInput { flex: 1; border: none; padding: 10px 15px; border-radius: 20px; outline: none; font-size: 15px; max-height: 120px; min-height: 40px; resize: none; background: var(--input-bg); color: var(--text-color); line-height: 20px; transition: background 0.3s, color 0.3s; }
+        #composer-wrap {
+            flex: 1;
+            min-width: 0;
+            background: var(--input-bg);
+            border-radius: 20px;
+            padding: 3px 10px;
+            transition: background 0.3s, color 0.3s;
+        }
+
+        #msgInput {
+            border: none;
+            padding: 7px 5px;
+            border-radius: 14px;
+            outline: none;
+            font-size: 15px;
+            max-height: 120px;
+            min-height: 34px;
+            overflow-y: auto;
+            background: transparent;
+            color: var(--text-color);
+            line-height: 20px;
+            transition: color 0.3s;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        #msgInput:empty::before {
+            content: attr(data-placeholder);
+            color: var(--secondary-text);
+            pointer-events: none;
+        }
+        #msgInput a { color: #00a884; text-decoration: underline; }
+        .spoiler-text,
+        .composer-spoiler {
+            background: rgba(0,0,0,0.18);
+            color: transparent;
+            border-radius: 6px;
+            padding: 0 4px;
+            cursor: pointer;
+            transition: background 0.2s, color 0.2s;
+        }
+        .spoiler-text.revealed {
+            color: inherit;
+            background: rgba(0,168,132,0.15);
+        }
+        .composer-spoiler {
+            color: inherit;
+            background: rgba(0,168,132,0.18);
+        }
+        #composer-context-menu {
+            position: fixed;
+            display: none;
+            z-index: 15000;
+            background: var(--reply-preview-bg);
+            border: 1px solid var(--input-border);
+            border-radius: 14px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.22);
+            padding: 6px;
+            gap: 4px;
+            align-items: center;
+            direction: rtl;
+        }
+        #composer-context-menu.show {
+            display: flex;
+        }
+        .composer-menu-btn {
+            border: none;
+            background: transparent;
+            color: var(--text-color);
+            min-width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            padding: 0 10px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s, color 0.3s;
+            white-space: nowrap;
+        }
+        .composer-menu-btn:hover {
+            background: rgba(0,0,0,0.08);
+        }
+        [data-theme="dark"] .composer-menu-btn:hover {
+            background: rgba(255,255,255,0.1);
+        }
 
         .icon-btn { background: transparent; border: none; cursor: pointer; padding: 8px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
         .icon-btn:hover { background: rgba(0,0,0,0.05); }
@@ -1064,7 +1150,9 @@ CHAT_PAGE = r"""
     <button class="icon-btn send-btn" onpointerdown="event.preventDefault();" onclick="sendTxt()">
         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
     </button>
-    <textarea id="msgInput" placeholder="پیام بنویسید..." rows="1" oninput="autoGrow(this)"></textarea>
+    <div id="composer-wrap">
+        <div id="msgInput" contenteditable="true" dir="auto" data-placeholder="پیام بنویسید..." role="textbox" aria-multiline="true"></div>
+    </div>
     <button class="icon-btn" id="video-note-btn" onpointerdown="event.preventDefault();" onclick="toggleVideoNoteRecording()" title="Video Note">
         <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
     </button>
@@ -1083,6 +1171,13 @@ CHAT_PAGE = r"""
     <span class="reaction-emoji" onclick="selectReaction('😂')">😂</span>
     <span class="reaction-emoji" onclick="selectReaction('😮')">😮</span>
     <span class="reaction-emoji" onclick="selectReaction('😢')">😢</span>
+</div>
+<div id="composer-context-menu">
+    <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('regular')">Tx</button>
+    <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('bold')">B</button>
+    <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('italic')">I</button>
+    <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('spoiler')">🙈</button>
+    <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('link')">🔗</button>
 </div>
 
 <script>
@@ -1155,6 +1250,35 @@ CHAT_PAGE = r"""
             let inputHadFocus = false;
             msgInput.addEventListener('focus', function() { inputHadFocus = true; });
             msgInput.addEventListener('blur', function() { inputHadFocus = false; });
+            msgInput.addEventListener('input', handleComposerInput);
+            msgInput.addEventListener('keyup', saveComposerSelection);
+            msgInput.addEventListener('mouseup', saveComposerSelection);
+            msgInput.addEventListener('contextmenu', function(e) {
+                if (!hasMeaningfulSelection()) {
+                    hideComposerContextMenu();
+                    return;
+                }
+                e.preventDefault();
+                saveComposerSelection();
+                showComposerContextMenu(e.clientX, e.clientY);
+            });
+            document.addEventListener('selectionchange', function() {
+                const selection = window.getSelection();
+                if (!selection || selection.rangeCount === 0) {
+                    hideComposerContextMenu();
+                    return;
+                }
+                const range = selection.getRangeAt(0);
+                if (range.collapsed) {
+                    hideComposerContextMenu();
+                    return;
+                }
+                if (msgInput.contains(range.commonAncestorContainer)) {
+                    composerSelectionRange = range.cloneRange();
+                } else {
+                    hideComposerContextMenu();
+                }
+            });
             document.getElementById('chat-box').addEventListener('touchend', function(e) {
                 if (!inputHadFocus) return;
                 const t = e.target;
@@ -1163,6 +1287,7 @@ CHAT_PAGE = r"""
                 // بازگرداندن فوکوس بدون اسکرول
                 setTimeout(function() { msgInput.focus({ preventScroll: true }); }, 50);
             }, { passive: true });
+            autoGrow(msgInput);
         }
     });
 
@@ -1177,6 +1302,9 @@ CHAT_PAGE = r"""
     const APP_TITLE = "این‌چت";
     let mobileKeyboardWasOpen = false;
     let pendingUploadCounter = 0;
+    let composerSelectionRange = null;
+    const textMessagePayloads = new Map();
+    let composerMenuCloseHandler = null;
 
     // ── تنظیم نمایش دکمه‌های ویس و ویدیومسیج ──────────────────────────
     const SHOW_MEDIA_BUTTONS = false;  // false = مخفی | true = نمایش
@@ -1500,8 +1628,413 @@ CHAT_PAGE = r"""
     }
 
     function autoGrow(el) {
-        el.style.height = '40px';
+        if (!el) return;
+        if (el.isContentEditable) {
+            if (el.textContent.replace(/\u200B/g, '').trim() === '' && el.innerHTML !== '') {
+                el.innerHTML = '';
+            }
+            el.style.height = '34px';
+            el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+            return;
+        }
+        el.style.height = '34px';
         el.style.height = (el.scrollHeight) + 'px';
+    }
+
+    function getComposer() {
+        return document.getElementById('msgInput');
+    }
+
+    function focusComposer() {
+        const composer = getComposer();
+        if (composer) composer.focus({ preventScroll: true });
+    }
+
+    function getComposerContextMenu() {
+        return document.getElementById('composer-context-menu');
+    }
+
+    function clearComposer() {
+        const composer = getComposer();
+        if (!composer) return;
+        composer.innerHTML = '';
+        composer.style.height = '40px';
+    }
+
+    function getComposerPlainText() {
+        const composer = getComposer();
+        if (!composer) return '';
+        return composer.innerText.replace(/\u00A0/g, ' ').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n');
+    }
+
+    function escapeHtml(text) {
+        return String(text ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+    }
+
+    function escapeAttr(text) {
+        return escapeHtml(text).replace(/'/g, '&#39;');
+    }
+
+    function normalizeUrl(url) {
+        const trimmed = String(url || '').trim();
+        if (!trimmed) return '';
+        if (/^https?:\/\//i.test(trimmed)) return trimmed;
+        return 'https://' + trimmed;
+    }
+
+    function hasMeaningfulSelection() {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return false;
+        const range = selection.getRangeAt(0);
+        return !range.collapsed && getComposer()?.contains(range.commonAncestorContainer);
+    }
+
+    function saveComposerSelection() {
+        const composer = getComposer();
+        const selection = window.getSelection();
+        if (!composer || !selection || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0);
+        if (composer.contains(range.commonAncestorContainer)) {
+            composerSelectionRange = range.cloneRange();
+        }
+    }
+
+    function hideComposerContextMenu() {
+        const menu = getComposerContextMenu();
+        if (!menu) return;
+        menu.classList.remove('show');
+        menu.style.display = 'none';
+        if (composerMenuCloseHandler) {
+            document.removeEventListener('mousedown', composerMenuCloseHandler);
+            document.removeEventListener('scroll', composerMenuCloseHandler, true);
+            window.removeEventListener('resize', composerMenuCloseHandler);
+            composerMenuCloseHandler = null;
+        }
+    }
+
+    function restoreComposerSelection() {
+        const composer = getComposer();
+        if (!composer) return false;
+        composer.focus({ preventScroll: true });
+        const selection = window.getSelection();
+        if (!selection) return false;
+        selection.removeAllRanges();
+        if (composerSelectionRange) {
+            selection.addRange(composerSelectionRange);
+            return true;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(composer);
+        range.collapse(false);
+        selection.addRange(range);
+        composerSelectionRange = range.cloneRange();
+        return true;
+    }
+
+    function syncComposerSelectionSoon() {
+        requestAnimationFrame(() => {
+            saveComposerSelection();
+        });
+    }
+
+    function insertComposerLineBreak() {
+        restoreComposerSelection();
+        if (document.execCommand) {
+            document.execCommand('insertLineBreak');
+        } else {
+            const selection = window.getSelection();
+            if (!selection || selection.rangeCount === 0) return;
+            const range = selection.getRangeAt(0);
+            range.deleteContents();
+            range.insertNode(document.createElement('br'));
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        }
+        handleComposerInput();
+    }
+
+    function applyComposerCommand(command, value = null) {
+        restoreComposerSelection();
+        if (document.execCommand) {
+            document.execCommand(command, false, value);
+        }
+        handleComposerInput();
+        focusComposer();
+        syncComposerSelectionSoon();
+        hideComposerContextMenu();
+    }
+
+    function unwrapComposerSpoilersInRange() {
+        const composer = getComposer();
+        const selection = window.getSelection();
+        if (!composer || !selection || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0);
+        const spoilers = Array.from(composer.querySelectorAll('[data-spoiler]'));
+        spoilers.forEach((node) => {
+            if (!range.intersectsNode(node)) return;
+            const parent = node.parentNode;
+            if (!parent) return;
+            while (node.firstChild) {
+                parent.insertBefore(node.firstChild, node);
+            }
+            parent.removeChild(node);
+        });
+    }
+
+    function clearComposerFormatting() {
+        if (!restoreComposerSelection() || !hasMeaningfulSelection()) return;
+        if (document.execCommand) {
+            document.execCommand('removeFormat', false, null);
+            document.execCommand('unlink', false, null);
+        }
+        unwrapComposerSpoilersInRange();
+        handleComposerInput();
+        focusComposer();
+        syncComposerSelectionSoon();
+        hideComposerContextMenu();
+    }
+
+    function applyComposerLink() {
+        if (!restoreComposerSelection() || !hasMeaningfulSelection()) return;
+        const currentSelection = window.getSelection().toString().trim();
+        const linkUrl = prompt('لینک را وارد کنید', currentSelection && /^https?:\/\//i.test(currentSelection) ? currentSelection : 'https://');
+        const normalized = normalizeUrl(linkUrl);
+        if (!normalized) return;
+        applyComposerCommand('createLink', normalized);
+    }
+
+    function applySpoilerFormat() {
+        if (!restoreComposerSelection() || !hasMeaningfulSelection()) return;
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0);
+        const spoiler = document.createElement('span');
+        spoiler.className = 'composer-spoiler';
+        spoiler.setAttribute('data-spoiler', 'true');
+        spoiler.appendChild(range.extractContents());
+        range.insertNode(spoiler);
+        range.selectNodeContents(spoiler);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        handleComposerInput();
+        focusComposer();
+        syncComposerSelectionSoon();
+        hideComposerContextMenu();
+    }
+
+    function showComposerContextMenu(clientX, clientY) {
+        if (!hasMeaningfulSelection()) {
+            hideComposerContextMenu();
+            return;
+        }
+        if (composerMenuCloseHandler) {
+            hideComposerContextMenu();
+        }
+        const menu = getComposerContextMenu();
+        if (!menu) return;
+        menu.style.visibility = 'hidden';
+        menu.style.display = 'flex';
+        menu.classList.add('show');
+        const rect = menu.getBoundingClientRect();
+        const padding = 10;
+        let left = clientX;
+        let top = clientY + 8;
+        if (left + rect.width > window.innerWidth - padding) {
+            left = window.innerWidth - rect.width - padding;
+        }
+        if (left < padding) left = padding;
+        if (top + rect.height > window.innerHeight - padding) {
+            top = clientY - rect.height - 8;
+        }
+        if (top < padding) top = padding;
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+        menu.style.visibility = 'visible';
+        composerMenuCloseHandler = (event) => {
+            if (event && menu.contains(event.target)) return;
+            hideComposerContextMenu();
+        };
+        setTimeout(() => {
+            if (!composerMenuCloseHandler) return;
+            document.addEventListener('mousedown', composerMenuCloseHandler);
+            document.addEventListener('scroll', composerMenuCloseHandler, true);
+            window.addEventListener('resize', composerMenuCloseHandler);
+        }, 0);
+    }
+
+    function runComposerMenuAction(action) {
+        if (action === 'regular') return clearComposerFormatting();
+        if (action === 'bold') return applyComposerCommand('bold');
+        if (action === 'italic') return applyComposerCommand('italic');
+        if (action === 'spoiler') return applySpoilerFormat();
+        if (action === 'link') return applyComposerLink();
+    }
+
+    function markSignature(mark) {
+        return [!!mark.bold, !!mark.italic, !!mark.spoiler, mark.href || ''].join('|');
+    }
+
+    function pushSegment(segments, segment) {
+        if (!segment || typeof segment.text !== 'string' || segment.text.length === 0) return;
+        const normalized = {
+            text: segment.text.replace(/\u00A0/g, ' '),
+            bold: !!segment.bold,
+            italic: !!segment.italic,
+            spoiler: !!segment.spoiler,
+            href: segment.href ? normalizeUrl(segment.href) : null
+        };
+        if (!normalized.text) return;
+        const prev = segments[segments.length - 1];
+        if (prev && markSignature(prev) === markSignature(normalized)) {
+            prev.text += normalized.text;
+            return;
+        }
+        segments.push(normalized);
+    }
+
+    function extractSegmentsFromNode(node, activeMarks, segments) {
+        if (!node) return;
+        if (node.nodeType === Node.TEXT_NODE) {
+            pushSegment(segments, { ...activeMarks, text: node.textContent || '' });
+            return;
+        }
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const tag = node.tagName.toLowerCase();
+        if (tag === 'br') {
+            pushSegment(segments, { ...activeMarks, text: '\n' });
+            return;
+        }
+        const nextMarks = { ...activeMarks };
+        if (tag === 'b' || tag === 'strong') nextMarks.bold = true;
+        if (tag === 'i' || tag === 'em') nextMarks.italic = true;
+        if (tag === 'a') nextMarks.href = node.getAttribute('href') || activeMarks.href || null;
+        if (node.hasAttribute('data-spoiler')) nextMarks.spoiler = true;
+
+        const blockLike = tag === 'div' || tag === 'p';
+        const childNodes = Array.from(node.childNodes);
+        childNodes.forEach((child) => extractSegmentsFromNode(child, nextMarks, segments));
+
+        if (blockLike && node.nextSibling) {
+            const last = segments[segments.length - 1];
+            if (!last || !last.text.endsWith('\n')) {
+                pushSegment(segments, { ...activeMarks, text: '\n' });
+            }
+        }
+    }
+
+    function payloadFromPlainText(text, legacyPlain = false) {
+        return {
+            kind: 'rich_text',
+            legacy_plain: legacyPlain,
+            segments: [{ text: String(text || '') }]
+        };
+    }
+
+    function sanitizePayloadSegments(segments) {
+        const out = [];
+        (Array.isArray(segments) ? segments : []).forEach((segment) => {
+            if (!segment || typeof segment.text !== 'string') return;
+            pushSegment(out, {
+                text: segment.text,
+                bold: !!segment.bold,
+                italic: !!segment.italic,
+                spoiler: !!segment.spoiler,
+                href: segment.href || null
+            });
+        });
+        return out.length ? out : [{ text: '' }];
+    }
+
+    function parseMessagePayload(raw) {
+        if (typeof raw !== 'string') return payloadFromPlainText('');
+        try {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.kind === 'rich_text' && Array.isArray(parsed.segments)) {
+                return {
+                    kind: 'rich_text',
+                    legacy_plain: false,
+                    segments: sanitizePayloadSegments(parsed.segments)
+                };
+            }
+        } catch (_) {}
+        return payloadFromPlainText(raw, true);
+    }
+
+    function serializeComposerPayload() {
+        const composer = getComposer();
+        if (!composer) return payloadFromPlainText('');
+        const segments = [];
+        Array.from(composer.childNodes).forEach((node) => extractSegmentsFromNode(node, { bold: false, italic: false, spoiler: false, href: null }, segments));
+        return {
+            kind: 'rich_text',
+            segments: sanitizePayloadSegments(segments)
+        };
+    }
+
+    function payloadToPlainText(payload) {
+        return sanitizePayloadSegments(payload?.segments).map((segment) => segment.text).join('');
+    }
+
+    function renderSegmentText(text, legacyPlain = false) {
+        if (legacyPlain) {
+            return linkify(text);
+        }
+        return escapeHtml(text).replace(/\n/g, '<br>');
+    }
+
+    function payloadToHtml(payload, options = {}) {
+        const safePayload = {
+            kind: 'rich_text',
+            legacy_plain: !!payload?.legacy_plain,
+            segments: sanitizePayloadSegments(payload?.segments)
+        };
+        if (safePayload.legacy_plain && !options.forEditor) {
+            return `<div>${renderSegmentText(payloadToPlainText(safePayload), true)}</div>`;
+        }
+        let html = '';
+        safePayload.segments.forEach((segment) => {
+            let part = renderSegmentText(segment.text, false);
+            if (segment.href) {
+                part = `<a href="${escapeAttr(segment.href)}" target="_blank" rel="noopener noreferrer">${part}</a>`;
+            }
+            if (segment.spoiler) {
+                part = `<span class="${options.forEditor ? 'composer-spoiler' : 'spoiler-text'}" data-spoiler="true">${part}</span>`;
+            }
+            if (segment.italic) {
+                part = `<em>${part}</em>`;
+            }
+            if (segment.bold) {
+                part = `<strong>${part}</strong>`;
+            }
+            html += part;
+        });
+        return `<div>${html || ''}</div>`;
+    }
+
+    function setComposerFromPayload(payload) {
+        const composer = getComposer();
+        if (!composer) return;
+        const safePayload = payload && payload.kind === 'rich_text' ? payload : payloadFromPlainText('');
+        composer.innerHTML = payloadToHtml(safePayload, { forEditor: true }).replace(/^<div>|<\/div>$/g, '');
+        autoGrow(composer);
+        syncComposerSelectionSoon();
+    }
+
+    function handleComposerInput() {
+        const composer = getComposer();
+        if (!composer) return;
+        autoGrow(composer);
+        saveComposerSelection();
+        const now = Date.now();
+        if (now - lastTypingSent > 800) {
+            lastTypingSent = now;
+            fetch('/typing', {method:'POST', body: JSON.stringify({u_id: myId})});
+        }
     }
 
     function addPendingUploadBubble(type, payload = {}) {
@@ -1593,7 +2126,11 @@ CHAT_PAGE = r"""
     async function render(m) {
         const box = document.getElementById('chat-box');
         let old = document.getElementById('msg-' + m.id);
-        if(m.deleted) { if(old) old.remove(); return; }
+        if(m.deleted) {
+            textMessagePayloads.delete(m.id);
+            if(old) old.remove();
+            return;
+        }
 
         const div = old || document.createElement('div');
         div.id = 'msg-' + m.id;
@@ -1639,6 +2176,9 @@ CHAT_PAGE = r"""
         if (m.sender_id !== myId) {
             div.onclick = (e) => {
                 // جلوگیری از باز شدن منو روی لینک، عکس، اکشن‌ها یا reply-area
+                if (e.target.closest('.spoiler-text')) {
+                    return;
+                }
                 if (e.target.tagName === 'A' || e.target.tagName === 'IMG' || e.target.closest('.msg-actions') || e.target.closest('.reply-area') || e.target.closest('.voice-player') || e.target.closest('.video-note') || e.target.closest('.file-card')) {
                     return;
                 }
@@ -1659,6 +2199,7 @@ CHAT_PAGE = r"""
         let videoMeta = null;
         let voiceMeta = null;
         let fileMeta = null;
+        let textPayload = payloadFromPlainText('');
         if (m.type === 'video_note' || m.type === 'voice' || m.type === 'file') {
             try {
                 const parsedMeta = JSON.parse(m.data || '{}');
@@ -1679,6 +2220,8 @@ CHAT_PAGE = r"""
             decryptedData = await dec(m.data);
         } else if (m.type !== 'video_note' && m.type !== 'voice' && m.type !== 'file') {
             decryptedData = await dec(m.data);
+            textPayload = parseMessagePayload(decryptedData);
+            textMessagePayloads.set(m.id, textPayload);
         }
         
         div.addEventListener('touchstart', (e) => {
@@ -1689,10 +2232,10 @@ CHAT_PAGE = r"""
                 longPressHappened = true;
                 try {
                     if (navigator.clipboard && window.isSecureContext) {
-                        await navigator.clipboard.writeText(decryptedData);
+                        await navigator.clipboard.writeText(payloadToPlainText(textPayload));
                     } else {
                         const ta = document.createElement('textarea');
-                        ta.value = decryptedData;
+                        ta.value = payloadToPlainText(textPayload);
                         document.body.appendChild(ta);
                         ta.select();
                         document.execCommand('copy');
@@ -1720,7 +2263,7 @@ CHAT_PAGE = r"""
             longPressHappened = false;
         }, {passive:true});
 
-        let content = decryptedData;
+        let content = m.type === 'text' ? payloadToPlainText(textPayload) : decryptedData;
         let replyText = m.reply_text ? await dec(m.reply_text) : '';
         let reply = m.reply_id ? `<div class="reply-area" onclick="scrollToMsg('${m.reply_id}')">${replyText}</div>` : '';
         let react = m.react ? `<div class="reaction">${m.react}</div>` : '';
@@ -1742,11 +2285,18 @@ CHAT_PAGE = r"""
         } else if (m.type === 'file') {
             body = createFileAttachment(fileMeta, m.id);
         } else {
-            body = `<div>${linkify(content)}</div>`;
+            body = payloadToHtml(textPayload);
         }
 
         let editedIcon = m.edited ? '<span style="font-size:9px; opacity:0.7; margin-right:4px;">✏️</span>' : '';
         div.innerHTML = `${reply} ${body} ${react} <div class="footer-info">${editedIcon}<span>${m.time}</span> ${seen}</div> ${actions}`;
+        div.querySelectorAll('.spoiler-text').forEach((el) => {
+            el.addEventListener('click', function(event) {
+                event.preventDefault();
+                event.stopPropagation();
+                this.classList.toggle('revealed');
+            });
+        });
         if(!old) box.appendChild(div);
     }
 
@@ -1758,53 +2308,52 @@ CHAT_PAGE = r"""
         const singleLineText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
         const previewText = singleLineText.length > 50 ? singleLineText.substring(0, 50) + '...' : singleLineText;
         document.getElementById('reply-text').innerText = previewText;
-        document.getElementById('msgInput').focus();
+        focusComposer();
     }
 
     function cancelReply(keepFocus=false) {
         replyingTo = null;
         document.getElementById('reply-preview').style.display = 'none';
-        if (keepFocus) document.getElementById('msgInput').focus({preventScroll:true});
+        if (keepFocus) focusComposer();
     }
 
     function cancelEdit(keepFocus=false) {
         if (!editingTo) {
-            if (keepFocus) document.getElementById('msgInput').focus({preventScroll:true});
+            if (keepFocus) focusComposer();
             return;
         }
         editingTo = null;
         document.getElementById('edit-preview').style.display = 'none';
         const i = document.getElementById('msgInput');
-        i.value = '';
-        i.style.height = '40px';
-        i.placeholder = 'پیام بنویسید...';
-        if (keepFocus) i.focus({preventScroll:true});
+        clearComposer();
+        i.dataset.placeholder = 'پیام بنویسید...';
+        if (keepFocus) focusComposer();
     }
 
     async function sendTxt() {
         let i = document.getElementById('msgInput');
-        if(!i.value.trim()) return;
+        const payload = serializeComposerPayload();
+        const plainText = payloadToPlainText(payload);
+        if(!plainText.trim()) return;
         
         if (editingTo) {
-            const encData = await enc(i.value.trim());
+            const encData = await enc(JSON.stringify(payload));
             postAction('/edit_message', {
                 id: editingTo.id,
                 data: encData
             });
-            i.value = '';
-            i.style.height = '40px';
-            i.placeholder = 'پیام بنویسید...';
+            clearComposer();
+            i.dataset.placeholder = 'پیام بنویسید...';
             cancelEdit();
         } else {
-            const encData = await enc(i.value);
+            const encData = await enc(JSON.stringify(payload));
             const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
             postAction('/send_message', {
                 type:'text', data: encData,
                 reply_id: replyingTo ? replyingTo.id : null,
                 reply_text: encReplyText
             });
-            i.value = '';
-            i.style.height = '40px';
+            clearComposer();
             cancelReply();
             setTimeout(() => scrollToBottom(), 100);
         }
@@ -2485,33 +3034,9 @@ CHAT_PAGE = r"""
         const msgEl = document.getElementById('msg-' + id);
         if (!msgEl) return;
         if (msgEl.querySelector('.voice-player') || msgEl.querySelector('.video-note') || msgEl.querySelector('.file-card')) return;
-        
-        const bodyDiv = msgEl.querySelector('div:not(.reply-area):not(.reaction):not(.footer-info):not(.msg-actions)');
-        if (!bodyDiv) return;
-        
-        if (bodyDiv.tagName === 'IMG') return;
-        
-        function extractTextWithBreaks(node) {
-            let text = '';
-            for (let child of node.childNodes) {
-                if (child.nodeType === Node.TEXT_NODE) {
-                    text += child.textContent;
-                } else if (child.nodeType === Node.ELEMENT_NODE) {
-                    if (child.tagName === 'BR' || child.tagName === 'br') {
-                        text += '\n';
-                    } else if (child.tagName === 'A' || child.tagName === 'a') {
-                        text += extractTextWithBreaks(child);
-                    } else {
-                        text += extractTextWithBreaks(child);
-                    }
-                }
-            }
-            return text;
-        }
-        
-        let currentText = extractTextWithBreaks(bodyDiv);
-        
-        editingTo = {id: id, originalText: currentText};
+        const payload = textMessagePayloads.get(id) || payloadFromPlainText('');
+        const currentText = payloadToPlainText(payload);
+        editingTo = {id: id, originalText: currentText, payload: payload};
         
         const ep = document.getElementById('edit-preview');
         ep.style.display = 'flex';
@@ -2521,12 +3046,11 @@ CHAT_PAGE = r"""
         document.getElementById('edit-text').innerText = previewText;
         
         const i = document.getElementById('msgInput');
-        i.value = currentText;
-        i.placeholder = 'پیام را ویرایش کنید...';
-        autoGrow(i);
+        i.dataset.placeholder = 'پیام را ویرایش کنید...';
+        setComposerFromPayload(payload);
         
         cancelReply();
-        i.focus();
+        focusComposer();
     }
 
     function scrollToMsg(id) {
@@ -2612,20 +3136,14 @@ CHAT_PAGE = r"""
     }
 
     let lastTypingSent = 0;
-    document.getElementById('msgInput').oninput = (e) => {
-        autoGrow(e.target);
-        const now = Date.now();
-        if (now - lastTypingSent > 800) {
-            lastTypingSent = now;
-            fetch('/typing', {method:'POST', body: JSON.stringify({u_id: myId})});
-        }
-    };
 
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 
     if (isMobile) {
         document.getElementById('msgInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
+                e.preventDefault();
+                insertComposerLineBreak();
                 return;
             }
         });
@@ -2633,6 +3151,8 @@ CHAT_PAGE = r"""
         document.getElementById('msgInput').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
                 if (e.shiftKey) {
+                    e.preventDefault();
+                    insertComposerLineBreak();
                     return;
                 } else {
                     e.preventDefault();
