@@ -1086,6 +1086,31 @@ CHAT_PAGE = r"""
             document.getElementById('mic-btn').style.display = 'none';
             document.getElementById('video-note-btn').style.display = 'none';
         }
+
+        // جلوگیری از بسته شدن کیبورد در موبایل هنگام کلیک/تاچ روی صفحه
+        const msgInput = document.getElementById('msgInput');
+        if (msgInput) {
+            // mousedown: جلوگیری از blur هنگام کلیک (دسکتاپ و اندروید)
+            document.addEventListener('mousedown', function(e) {
+                if (document.activeElement !== msgInput) return;
+                const t = e.target;
+                if (t === msgInput || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+                e.preventDefault();
+            });
+            // touchstart روی chat-box: از preventDefault استفاده نمی‌کنیم تا اسکرول نشکنه
+            // به جایش بعد از touchend فوکوس رو برمی‌گردونیم (iOS Safari)
+            let inputHadFocus = false;
+            msgInput.addEventListener('focus', function() { inputHadFocus = true; });
+            msgInput.addEventListener('blur', function() { inputHadFocus = false; });
+            document.getElementById('chat-box').addEventListener('touchend', function(e) {
+                if (!inputHadFocus) return;
+                const t = e.target;
+                if (t === msgInput || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+                if (t.closest('.msg-actions') || t.closest('.reaction-menu') || t.tagName === 'BUTTON' || t.tagName === 'A') return;
+                // بازگرداندن فوکوس بدون اسکرول
+                setTimeout(function() { msgInput.focus({ preventScroll: true }); }, 50);
+            }, { passive: true });
+        }
     });
 
     let myId = "ME";
