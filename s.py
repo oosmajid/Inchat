@@ -646,6 +646,8 @@ CHAT_PAGE = r"""
 
         .sent { background: var(--sent-msg-bg); color: var(--text-color); align-self: flex-start; border-top-left-radius: 4px; transition: background 0.3s, color 0.3s; }
         .received { background: var(--received-msg-bg); color: var(--text-color); align-self: flex-end; border-top-right-radius: 4px; transition: background 0.3s, color 0.3s; }
+        .pending-upload { opacity: 0.5; pointer-events: none; }
+        .pending-upload-status { font-size: 10px; color: var(--secondary-text); margin-top: 6px; }
         .highlight { background: var(--highlight-bg) !important; }
 
         /* Reactions */
@@ -1174,6 +1176,7 @@ CHAT_PAGE = r"""
     let hasFetchedOnce = false;
     const APP_TITLE = "این‌چت";
     let mobileKeyboardWasOpen = false;
+    let pendingUploadCounter = 0;
 
     // ── تنظیم نمایش دکمه‌های ویس و ویدیومسیج ──────────────────────────
     const SHOW_MEDIA_BUTTONS = false;  // false = مخفی | true = نمایش
@@ -1501,6 +1504,38 @@ CHAT_PAGE = r"""
         el.style.height = (el.scrollHeight) + 'px';
     }
 
+    function addPendingUploadBubble(type, payload = {}) {
+        const box = document.getElementById('chat-box');
+        if (!box) return null;
+        const tempId = 'pending-upload-' + (++pendingUploadCounter);
+        const div = document.createElement('div');
+        div.id = tempId;
+        div.className = 'msg sent pending-upload';
+
+        let body = '';
+        if (type === 'image') {
+            body = `<img src="${payload.previewUrl}" style="max-width:100%; border-radius:12px;">`;
+        } else if (type === 'file') {
+            body = createFileAttachment({
+                file: 'pending',
+                name: payload.name || 'فایل',
+                mime: payload.mime || 'application/octet-stream',
+                size: payload.size || 0
+            }, tempId);
+        }
+
+        div.innerHTML = `${body}<div class="pending-upload-status">در حال آپلود...</div>`;
+        box.appendChild(div);
+        scrollToBottom();
+        return tempId;
+    }
+
+    function removePendingUploadBubble(tempId) {
+        if (!tempId) return;
+        const el = document.getElementById(tempId);
+        if (el) el.remove();
+    }
+
     async function fetchMessages() {
         try {
             await initCrypto();
@@ -1778,37 +1813,52 @@ CHAT_PAGE = r"""
     async function sendImg(input) {
         const file = input.files[0];
         if (!file) return;
+        const previewUrl = URL.createObjectURL(file);
+        const pendingId = addPendingUploadBubble('image', { previewUrl });
 
         const img = new Image();
         img.onload = async () => {
-            const maxW = 720;
-            const scale = Math.min(1, maxW / img.width);
-            const w = Math.round(img.width * scale);
-            const h = Math.round(img.height * scale);
+            try {
+                const maxW = 720;
+                const scale = Math.min(1, maxW / img.width);
+                const w = Math.round(img.width * scale);
+                const h = Math.round(img.height * scale);
 
-            const canvas = document.createElement('canvas');
-            canvas.width = w; canvas.height = h;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, w, h);
+                const canvas = document.createElement('canvas');
+                canvas.width = w; canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, w, h);
 
-            const quality = 0.5;
-            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+                const quality = 0.5;
+                const dataUrl = canvas.toDataURL('image/jpeg', quality);
 
-            const encData = await enc(dataUrl);
-            const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
-            
-            await postAction('/send_message', {
-                type: 'image',
-                data: encData,
-                reply_id: replyingTo ? replyingTo.id : null,
-                reply_text: encReplyText
-            });
-
-            input.value = "";
-            setTimeout(() => scrollToBottom(), 100);
+                const encData = await enc(dataUrl);
+                const encReplyText = replyingTo ? await enc(replyingTo.text) : null;
+                
+                await postAction('/send_message', {
+                    type: 'image',
+                    data: encData,
+                    reply_id: replyingTo ? replyingTo.id : null,
+                    reply_text: encReplyText
+                });
+                removePendingUploadBubble(pendingId);
+                input.value = "";
+                setTimeout(() => scrollToBottom(), 100);
+            } catch (error) {
+                removePendingUploadBubble(pendingId);
+                console.error('Error sending image:', error);
+                alert('ارسال تصویر ناموفق بود');
+            } finally {
+                URL.revokeObjectURL(previewUrl);
+            }
+        };
+        img.onerror = () => {
+            removePendingUploadBubble(pendingId);
+            URL.revokeObjectURL(previewUrl);
+            alert('خواندن تصویر ناموفق بود');
         };
 
-        img.src = URL.createObjectURL(file);
+        img.src = previewUrl;
     }
 
     function formatFileSize(bytes) {
@@ -1833,6 +1883,7 @@ CHAT_PAGE = r"""
     async function sendAttachment(input) {
         const file = input.files[0];
         if (!file) return;
+        let pendingId = null;
 
         try {
             if (file.type && file.type.startsWith('image/')) {
@@ -1845,6 +1896,11 @@ CHAT_PAGE = r"""
                 return;
             }
 
+            pendingId = addPendingUploadBubble('file', {
+                name: file.name,
+                mime: file.type,
+                size: file.size
+            });
             const encryptedBytes = await encryptBinary(await file.arrayBuffer());
             const encReplyText = replyingTo ? await enc(replyingTo.text) : '';
             const params = new URLSearchParams({
@@ -1863,10 +1919,12 @@ CHAT_PAGE = r"""
             });
             if (!response.ok) throw new Error('file upload failed');
 
+            removePendingUploadBubble(pendingId);
             cancelReply();
             fetchMessages();
             setTimeout(() => scrollToBottom(), 100);
         } catch (error) {
+            removePendingUploadBubble(pendingId);
             console.error('Error sending file:', error);
             alert('ارسال فایل ناموفق بود');
         } finally {
