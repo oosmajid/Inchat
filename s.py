@@ -1122,6 +1122,7 @@ CHAT_PAGE = r"""
     let unreadCount = 0;
     let hasFetchedOnce = false;
     const APP_TITLE = "این‌چت";
+    let mobileKeyboardWasOpen = false;
 
     // ── تنظیم نمایش دکمه‌های ویس و ویدیومسیج ──────────────────────────
     const SHOW_MEDIA_BUTTONS = false;  // false = مخفی | true = نمایش
@@ -1229,6 +1230,18 @@ CHAT_PAGE = r"""
         }
     }
 
+    function isEditableElement(el) {
+        return !!el && (
+            el.tagName === 'INPUT' ||
+            el.tagName === 'TEXTAREA' ||
+            el.isContentEditable
+        );
+    }
+
+    function shouldHandleMobileKeyboard() {
+        return window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+    }
+
     function updateAppHeight(){
         const vv = window.visualViewport;
         const h = vv ? vv.height : window.innerHeight;
@@ -1237,6 +1250,12 @@ CHAT_PAGE = r"""
         const keyboardH = vv ? Math.max(0, window.innerHeight - vv.height - (vv.offsetTop || 0)) : 0;
         const bottom = keyboardH + inputH + 12;
         document.documentElement.style.setProperty('--bubble-bottom', bottom + 'px');
+
+        const keyboardOpen = keyboardH > 120;
+        if (shouldHandleMobileKeyboard() && mobileKeyboardWasOpen && !keyboardOpen && isEditableElement(document.activeElement)) {
+            document.activeElement.blur();
+        }
+        mobileKeyboardWasOpen = keyboardOpen;
     }
 
     updateAppHeight();
