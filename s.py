@@ -1658,7 +1658,7 @@ CHAT_PAGE = r"""
         const composer = getComposer();
         if (!composer) return;
         composer.innerHTML = '';
-        composer.style.height = '40px';
+        composer.style.height = '34px';
     }
 
     function getComposerPlainText() {
