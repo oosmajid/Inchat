@@ -1240,6 +1240,7 @@ CHAT_PAGE = r"""
         if (msgInput) {
             // mousedown: جلوگیری از blur هنگام کلیک (دسکتاپ و اندروید)
             document.addEventListener('mousedown', function(e) {
+                if (window.innerWidth > 768) return;
                 if (document.activeElement !== msgInput) return;
                 const t = e.target;
                 if (t === msgInput || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
