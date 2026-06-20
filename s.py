@@ -32,7 +32,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- تنظیمات سرور ---
-PORT = 2026
+PORT = int(os.environ.get("PORT", "2026") or "2026")
+# TLS اختیاری: اگر هر دو فایل گواهی/کلید معرفی شوند، روی HTTPS سرو می‌شود
+# (برای دسترسی مرورگر به دوربین/میکروفون لازم است؛ getUserMedia فقط روی بستر امن کار می‌کند)
+SSL_CERTFILE = os.environ.get("SSL_CERTFILE", "").strip()
+SSL_KEYFILE = os.environ.get("SSL_KEYFILE", "").strip()
 MAX_MESSAGES_IN_MEMORY = 500  # حداکثر تعداد پیام در حافظه
 MESSAGE_EXPIRY_HOURS = 24  # مدت زمان نگهداری پیام‌ها
 
@@ -1836,7 +1840,8 @@ CHAT_PAGE = r"""
         }
 
         /* --- منوی هدر، سنجاق، جست‌وجو، مودال‌ها (فیچرهای جدید) --- */
-        #menu-btn{position:absolute;right:16px;top:50%;transform:translateY(-50%);background:var(--input-bg);border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;font-size:22px;color:var(--text-color);display:flex;align-items:center;justify-content:center;line-height:1;transition:all .2s}
+        #header-actions{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:7px}
+        #menu-btn{background:var(--input-bg);border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;font-size:22px;color:var(--text-color);display:flex;align-items:center;justify-content:center;line-height:1;transition:all .2s}
         #menu-btn:hover{filter:brightness(.95)}
         #header-menu{position:absolute;top:58px;right:12px;background:var(--surface);border:1px solid var(--hairline);border-radius:14px;box-shadow:0 12px 32px rgba(15,26,36,.16);padding:6px;display:none;flex-direction:column;z-index:1300;min-width:215px}
         #header-menu.show{display:flex}
@@ -1917,13 +1922,15 @@ CHAT_PAGE = r"""
     <button class="theme-toggle" onclick="toggleTheme()" title="تغییر تم">🌙</button>
     <b id="room-title">این‌چت</b>
     <div id="status-bar">درحال اتصال...</div>
-    <button id="call-audio-btn" class="call-hdr-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="startCall('audio')" title="تماس صوتی">
-        <svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
-    </button>
-    <button id="call-video-btn" class="call-hdr-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="startCall('video')" title="تماس تصویری">
-        <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
-    </button>
-    <button id="menu-btn" onpointerdown="event.preventDefault();" onclick="toggleHeaderMenu(event)" title="منو">⋮</button>
+    <div id="header-actions">
+        <button id="call-audio-btn" class="call-hdr-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="startCall('audio')" title="تماس صوتی">
+            <svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
+        </button>
+        <button id="call-video-btn" class="call-hdr-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="startCall('video')" title="تماس تصویری">
+            <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+        </button>
+        <button id="menu-btn" onpointerdown="event.preventDefault();" onclick="toggleHeaderMenu(event)" title="منو">⋮</button>
+    </div>
     <div id="header-menu">
         <button onpointerdown="event.preventDefault();" onclick="openSearch()">🔍 جست‌وجو در گفت‌وگو</button>
         <button onpointerdown="event.preventDefault();" onclick="openChecklist()">☑️ چک‌لیست مشترک</button>
@@ -2080,8 +2087,10 @@ CHAT_PAGE = r"""
 #call-incoming .ring-sub{font-size:15px;opacity:.85;margin-bottom:48px}
 #call-incoming .ring-actions{display:flex;gap:64px}
 .ring-action{display:flex;flex-direction:column;align-items:center;gap:10px;font-size:13px;color:#fff;cursor:pointer}
-.call-hdr-btn{background:transparent;border:none;cursor:pointer;padding:6px;display:flex;align-items:center;justify-content:center}
-.call-hdr-btn svg{width:23px;height:23px;fill:var(--header-text,#fff)}
+.call-hdr-btn{background:var(--input-bg);border:none;border-radius:50%;width:38px;height:38px;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;transition:all .2s}
+.call-hdr-btn:hover{filter:brightness(.95);transform:scale(1.06)}
+.call-hdr-btn:active{transform:scale(.94)}
+.call-hdr-btn svg{width:21px;height:21px;fill:var(--accent)}
 </style>
 <div id="call-incoming">
     <div class="ring-avatar" id="ring-avatar">📞</div>
@@ -5671,7 +5680,17 @@ if __name__ == "__main__":
     
     # شروع سرور
     with ThreadingHTTPServer(("0.0.0.0", PORT), ChatHandler) as httpd:
-        logger.info(f"سرور چت در پورت {PORT} شروع به کار کرد...")
+        scheme = "http"
+        if SSL_CERTFILE and SSL_KEYFILE and os.path.isfile(SSL_CERTFILE) and os.path.isfile(SSL_KEYFILE):
+            try:
+                import ssl
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(certfile=SSL_CERTFILE, keyfile=SSL_KEYFILE)
+                httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+                scheme = "https"
+            except Exception as e:
+                logger.error(f"TLS فعال نشد ({e})؛ روی HTTP ادامه می‌دهد")
+        logger.info(f"سرور چت روی {scheme}://0.0.0.0:{PORT} شروع به کار کرد...")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
