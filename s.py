@@ -5658,6 +5658,33 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128  # backlog بزرگ‌تر برای اتصالات هم‌زمان (long-poll تماس و …)
+    ssl_context = None        # اگر ست شود، TLS فعال می‌شود
+
+    def get_request(self):
+        """accept در ترد اصلی؛ اما TLS handshake را به ترد کارگر موکول می‌کنیم.
+        نکتهٔ حیاتی: اگر handshake همین‌جا (ترد accept) انجام شود، یک کلاینتِ کند
+        می‌تواند کل سرور را قفل کند. پس فقط رپ می‌کنیم و handshake را عقب می‌اندازیم."""
+        sock, addr = self.socket.accept()
+        if self.ssl_context is not None:
+            sock = self.ssl_context.wrap_socket(
+                sock, server_side=True, do_handshake_on_connect=False)
+        return sock, addr
+
+    def finish_request(self, request, client_address):
+        """در ترد کارگر اجرا می‌شود؛ handshake را اینجا با timeout انجام می‌دهیم."""
+        if self.ssl_context is not None:
+            try:
+                request.settimeout(15)
+                request.do_handshake()
+                request.settimeout(None)
+            except Exception:
+                try:
+                    request.close()
+                except Exception:
+                    pass
+                return
+        super().finish_request(request, client_address)
 
 
 # تزریق @font-face امبدشده به هر دو قالب صفحه
@@ -5686,7 +5713,8 @@ if __name__ == "__main__":
                 import ssl
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ctx.load_cert_chain(certfile=SSL_CERTFILE, keyfile=SSL_KEYFILE)
-                httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+                # handshake در ترد کارگر انجام می‌شود (نه ترد accept) تا یک کلاینت کند سرور را قفل نکند
+                httpd.ssl_context = ctx
                 scheme = "https"
             except Exception as e:
                 logger.error(f"TLS فعال نشد ({e})؛ روی HTTP ادامه می‌دهد")
