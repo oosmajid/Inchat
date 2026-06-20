@@ -12,6 +12,10 @@ import hmac
 import secrets
 import re
 import html
+import base64
+import socket
+import shutil
+import subprocess
 from datetime import datetime, timedelta
 from collections import deque
 from http.cookies import SimpleCookie
@@ -134,6 +138,316 @@ ROOMS_STATE = {}
 
 # استفاده از RLock برای امکان nested locking
 LOCKED = threading.RLock()
+
+
+# ==========================================================================
+# ===  تماس صوتی/تصویری (WebRTC) — نصب خودکار TURN + سیگنالینگ بدون وابستگی  ===
+# ==========================================================================
+# طراحی:
+#   • همهٔ مدیا (صدا/تصویر) مستقیماً بین دو مرورگر رد و بدل می‌شود (P2P، رمزنگاری‌شده).
+#   • سرور فقط «سیگنالینگ» (تبادل SDP و ICE) و در صورت نیاز «رله TURN» را فراهم می‌کند.
+#   • TURN/STUN روی همین سرور خودمان اجرا می‌شود (coturn) → هیچ وابستگی به سرویس خارجی،
+#     کاملاً سازگار با شرایط قطع اینترنت بین‌الملل (همه‌چیز داخل کشور).
+#   • اگر نصب/راه‌اندازی coturn به هر دلیلی شکست بخورد، فقط تماس غیرفعال می‌شود و
+#     باقی اپ کاملاً سالم کار می‌کند (CALLS_ENABLED = False).
+
+# قابل override با متغیرهای محیطی:
+TURN_PUBLIC_IP = os.environ.get("TURN_PUBLIC_IP", "").strip()       # اگر سرور پشت NAT است، IP عمومی را اینجا بده
+TURN_REALM = os.environ.get("TURN_REALM", "inchat.local").strip()
+TURN_PORT = int(os.environ.get("TURN_PORT", "3478") or "3478")
+TURN_MIN_PORT = int(os.environ.get("TURN_MIN_PORT", "49160") or "49160")
+TURN_MAX_PORT = int(os.environ.get("TURN_MAX_PORT", "49300") or "49300")
+USE_IRANIAN_MIRROR = os.environ.get("USE_IRANIAN_MIRROR", "1") == "1"
+IRANIAN_UBUNTU_MIRROR = os.environ.get("IRANIAN_UBUNTU_MIRROR", "http://mirror.arvancloud.ir/ubuntu").rstrip("/")
+
+TURN_SECRET_FILE = ".turn_secret"
+TURN_CONF_FILE = "turnserver.conf"
+CALL_TTL = 3600  # عمر اعتبارنامهٔ موقت TURN (ثانیه)
+
+# وضعیت سراسری تماس
+CALLS_ENABLED = False
+TURN_SECRET = None
+_TURN_PROC = None
+_DETECTED_IP_CACHE = None
+
+# صندوق سیگنالینگ به تفکیک اتاق (در حافظه)
+# CALL_SIGNALS[room_id] = {'seq': int, 'items': deque([{seq,to,frm,data,ts}])}
+CALL_SIGNALS = {}
+CALL_COND = threading.Condition()
+SIGNAL_MAX_AGE = 60  # ثانیه؛ سیگنال‌های قدیمی‌تر دور ریخته می‌شوند
+
+
+def _load_or_create_turn_secret():
+    """کلید مشترک coturn (use-auth-secret)؛ بین ری‌استارت‌ها حفظ می‌شود."""
+    try:
+        if os.path.isfile(TURN_SECRET_FILE):
+            with open(TURN_SECRET_FILE) as f:
+                s = f.read().strip()
+                if len(s) >= 32:
+                    return s
+        s = secrets.token_hex(32)
+        with open(TURN_SECRET_FILE, "w") as f:
+            f.write(s)
+        try:
+            os.chmod(TURN_SECRET_FILE, 0o600)
+        except Exception:
+            pass
+        return s
+    except Exception:
+        return secrets.token_hex(32)
+
+
+def _detect_public_ip():
+    """تشخیص IP اصلی سرور بدون نیاز به اینترنت بین‌الملل (فقط route lookup)."""
+    global _DETECTED_IP_CACHE
+    if TURN_PUBLIC_IP:
+        return TURN_PUBLIC_IP
+    if _DETECTED_IP_CACHE:
+        return _DETECTED_IP_CACHE
+    ip = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # هیچ بسته‌ای ارسال نمی‌شود؛ فقط interface خروجی پیش‌فرض پیدا می‌شود
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    if not ip or ip.startswith("127."):
+        try:
+            ip = socket.gethostbyname(socket.gethostname())
+        except Exception:
+            ip = None
+    _DETECTED_IP_CACHE = ip or "127.0.0.1"
+    return _DETECTED_IP_CACHE
+
+
+def make_turn_credentials(ttl=CALL_TTL):
+    """اعتبارنامهٔ موقت TURN (سازگار با use-auth-secret/REST API coturn)."""
+    expiry = int(time.time()) + ttl
+    username = str(expiry)
+    digest = hmac.new(TURN_SECRET.encode(), username.encode(), hashlib.sha1).digest()
+    cred = base64.b64encode(digest).decode()
+    return username, cred
+
+
+def build_ice_servers(host_hint=""):
+    """لیست iceServers برای مرورگر؛ STUN و TURN هر دو روی coturn خودمان."""
+    if not CALLS_ENABLED or not TURN_SECRET:
+        return {"enabled": False, "iceServers": []}
+    host = (host_hint or TURN_PUBLIC_IP or _detect_public_ip()).strip()
+    username, cred = make_turn_credentials()
+    return {
+        "enabled": True,
+        "ttl": CALL_TTL,
+        "iceServers": [
+            {"urls": [f"stun:{host}:{TURN_PORT}"]},
+            {
+                "urls": [
+                    f"turn:{host}:{TURN_PORT}?transport=udp",
+                    f"turn:{host}:{TURN_PORT}?transport=tcp",
+                ],
+                "username": username,
+                "credential": cred,
+            },
+        ],
+    }
+
+
+def _turn_conf_text(secret, ext_ip):
+    lines = [
+        f"listening-port={TURN_PORT}",
+        "fingerprint",
+        "use-auth-secret",
+        f"static-auth-secret={secret}",
+        f"realm={TURN_REALM}",
+        f"min-port={TURN_MIN_PORT}",
+        f"max-port={TURN_MAX_PORT}",
+        "no-cli",
+        "stale-nonce=600",
+        "no-multicast-peers",
+    ]
+    if ext_ip and not ext_ip.startswith("127."):
+        lines.append(f"external-ip={ext_ip}")
+    return "\n".join(lines) + "\n"
+
+
+def _tcp_port_open(port, host="127.0.0.1"):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.6)
+        rc = s.connect_ex((host, port))
+        s.close()
+        return rc == 0
+    except Exception:
+        return False
+
+
+def _is_root():
+    try:
+        return os.geteuid() == 0
+    except Exception:
+        return False
+
+
+def _run(cmd, timeout=600, env=None):
+    try:
+        r = subprocess.run(cmd, env=env, stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, timeout=timeout)
+        return r.returncode == 0
+    except Exception as e:
+        logger.warning(f"TURN: اجرای «{' '.join(cmd)}» ناموفق: {e}")
+        return False
+
+
+def _apt_install_coturn():
+    """نصب coturn؛ ابتدا با مخازن فعلی، در صورت شکست با میرور ایرانی."""
+    if not shutil.which("apt-get"):
+        logger.warning("TURN: این سیستم apt ندارد؛ coturn را دستی نصب کن (apt install coturn)")
+        return False
+    if not _is_root():
+        logger.warning("TURN: برای نصب خودکار coturn به دسترسی root نیاز است (sudo python3 s.py)")
+        return False
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    _run(["apt-get", "update"], timeout=300, env=env)
+    if _run(["apt-get", "install", "-y", "coturn"], env=env) and shutil.which("turnserver"):
+        logger.info("TURN: coturn از مخازن پیش‌فرض نصب شد")
+        return True
+    if USE_IRANIAN_MIRROR:
+        logger.info("TURN: نصب از مخازن پیش‌فرض ناموفق بود؛ تلاش با میرور ایرانی...")
+        try:
+            codename = "jammy"
+            try:
+                out = subprocess.run(["lsb_release", "-cs"], stdout=subprocess.PIPE,
+                                     text=True, timeout=30).stdout.strip()
+                if out:
+                    codename = out
+            except Exception:
+                pass
+            with open("/etc/apt/sources.list.d/inchat-ir-mirror.list", "w") as f:
+                f.write(f"deb {IRANIAN_UBUNTU_MIRROR} {codename} main universe\n")
+                f.write(f"deb {IRANIAN_UBUNTU_MIRROR} {codename}-updates main universe\n")
+        except Exception as e:
+            logger.warning(f"TURN: افزودن میرور ایرانی ناموفق: {e}")
+        _run(["apt-get", "update"], timeout=300, env=env)
+        if _run(["apt-get", "install", "-y", "coturn"], env=env) and shutil.which("turnserver"):
+            logger.info("TURN: coturn از میرور ایرانی نصب شد")
+            return True
+    logger.warning("TURN: نصب coturn ناموفق بود")
+    return False
+
+
+def _launch_turnserver(conf_path):
+    """اجرای turnserver به‌صورت پراسس فرزند (foreground) تا توسط watchdog کنترل شود."""
+    global _TURN_PROC
+    binary = shutil.which("turnserver")
+    if not binary:
+        return False
+    try:
+        _TURN_PROC = subprocess.Popen(
+            [binary, "-c", conf_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        logger.error(f"TURN: اجرای turnserver ناموفق: {e}")
+        return False
+    for _ in range(24):  # تا ~6 ثانیه صبر برای بالا آمدن
+        time.sleep(0.25)
+        if _TURN_PROC.poll() is not None:
+            logger.error("TURN: turnserver بلافاصله متوقف شد (احتمالاً پورت اشغال است)")
+            return False
+        if _tcp_port_open(TURN_PORT):
+            return True
+    return _TURN_PROC.poll() is None
+
+
+def _turn_watchdog(conf_path):
+    """در صورت کرش turnserver، آن را دوباره بالا می‌آورد."""
+    while True:
+        time.sleep(5)
+        try:
+            if _TURN_PROC is None or _TURN_PROC.poll() is not None:
+                logger.warning("TURN: turnserver متوقف شده بود؛ ری‌استارت...")
+                _launch_turnserver(conf_path)
+        except Exception:
+            pass
+
+
+def setup_turn():
+    """ویزارد راه‌اندازی خودکار TURN. هر خطایی غیرکشنده است (اصل اپ سالم می‌ماند)."""
+    global CALLS_ENABLED, TURN_SECRET
+    try:
+        TURN_SECRET = _load_or_create_turn_secret()
+        ext_ip = _detect_public_ip()
+
+        already = _tcp_port_open(TURN_PORT)
+        if already:
+            # coturn از قبل بالاست (مثلاً اجرای قبلی همین اسکریپت با همان .turn_secret)
+            logger.info(f"TURN: سرویسی روی پورت {TURN_PORT} فعال است؛ از همان استفاده می‌شود")
+            CALLS_ENABLED = True
+            return
+
+        if not shutil.which("turnserver"):
+            if not _apt_install_coturn():
+                logger.warning("TURN: coturn در دسترس نیست؛ تماس صوتی/تصویری غیرفعال ماند "
+                               "(اصل چت کاملاً سالم است)")
+                return
+
+        conf_path = os.path.abspath(TURN_CONF_FILE)
+        try:
+            with open(conf_path, "w") as f:
+                f.write(_turn_conf_text(TURN_SECRET, ext_ip))
+        except Exception as e:
+            logger.error(f"TURN: نوشتن کانفیگ ناموفق: {e}")
+            return
+
+        if _launch_turnserver(conf_path):
+            CALLS_ENABLED = True
+            threading.Thread(target=_turn_watchdog, args=(conf_path,), daemon=True).start()
+            logger.info(f"TURN: فعال شد ✓  پورت={TURN_PORT}  external-ip={ext_ip}  "
+                        f"relay={TURN_MIN_PORT}-{TURN_MAX_PORT}")
+        else:
+            logger.warning("TURN: راه‌اندازی turnserver ناموفق؛ تماس غیرفعال ماند (اصل اپ سالم است)")
+    except Exception as e:
+        logger.error(f"TURN: خطای غیرمنتظره: {e}؛ اصل اپ بدون تماس ادامه می‌دهد")
+
+
+# --- صندوق سیگنالینگ تماس (in-memory، long-poll) ---
+def _call_state(room_id):
+    st = CALL_SIGNALS.get(room_id)
+    if st is None:
+        st = {'seq': 0, 'items': deque()}
+        CALL_SIGNALS[room_id] = st
+    return st
+
+
+def push_signal(room_id, frm, to, data):
+    """افزودن یک سیگنال برای نقش مقصد و بیدارکردن long-pollها."""
+    with CALL_COND:
+        st = _call_state(room_id)
+        st['seq'] += 1
+        st['items'].append({'seq': st['seq'], 'to': to, 'frm': frm,
+                            'data': data, 'ts': time.time()})
+        cutoff = time.time() - SIGNAL_MAX_AGE
+        while st['items'] and st['items'][0]['ts'] < cutoff:
+            st['items'].popleft()
+        CALL_COND.notify_all()
+
+
+def fetch_signals(room_id, role, since_seq, timeout=20):
+    """long-poll: تا «timeout» ثانیه منتظر سیگنال تازه برای این نقش می‌ماند."""
+    deadline = time.time() + timeout
+    with CALL_COND:
+        while True:
+            st = _call_state(room_id)
+            out = [it for it in st['items'] if it['to'] == role and it['seq'] > since_seq]
+            if out:
+                return st['seq'], out
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return st['seq'], []
+            CALL_COND.wait(timeout=remaining)
 
 # --- کلید رمزنگاری AES-like (ساده‌شده برای سازگاری با مرورگر) ---
 # نکته: برای امنیت بیشتر باید از Web Crypto API استفاده شود
@@ -1603,6 +1917,12 @@ CHAT_PAGE = r"""
     <button class="theme-toggle" onclick="toggleTheme()" title="تغییر تم">🌙</button>
     <b id="room-title">این‌چت</b>
     <div id="status-bar">درحال اتصال...</div>
+    <button id="call-audio-btn" class="call-hdr-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="startCall('audio')" title="تماس صوتی">
+        <svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>
+    </button>
+    <button id="call-video-btn" class="call-hdr-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="startCall('video')" title="تماس تصویری">
+        <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+    </button>
     <button id="menu-btn" onpointerdown="event.preventDefault();" onclick="toggleHeaderMenu(event)" title="منو">⋮</button>
     <div id="header-menu">
         <button onpointerdown="event.preventDefault();" onclick="openSearch()">🔍 جست‌وجو در گفت‌وگو</button>
@@ -1725,6 +2045,80 @@ CHAT_PAGE = r"""
     <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('italic')">I</button>
     <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('spoiler')">🙈</button>
     <button class="composer-menu-btn" type="button" onpointerdown="event.preventDefault();" onclick="runComposerMenuAction('link')">🔗</button>
+</div>
+
+<!-- ============ تماس صوتی/تصویری (WebRTC) ============ -->
+<style>
+#call-screen{position:fixed;inset:0;z-index:100000;background:#0b141a;display:none;flex-direction:column;overflow:hidden}
+#call-screen.show{display:flex}
+#call-remote-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0b141a}
+#call-screen.audio-only #call-remote-video{display:none}
+#call-local-video{position:absolute;top:18px;left:18px;width:104px;height:150px;object-fit:cover;border-radius:14px;background:#1b2a33;box-shadow:0 6px 20px rgba(0,0,0,.45);z-index:3;transform:scaleX(-1);transition:opacity .2s}
+#call-screen.audio-only #call-local-video{display:none}
+#call-overlay-top{position:absolute;top:0;left:0;right:0;z-index:4;padding:34px 22px 60px;text-align:center;color:#fff;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent);pointer-events:none}
+#call-avatar{width:118px;height:118px;border-radius:50%;margin:6vh auto 18px;background:linear-gradient(135deg,#2aabee,#1c84c6);display:flex;align-items:center;justify-content:center;font-size:54px;color:#fff;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+#call-screen:not(.audio-only) #call-avatar{display:none}
+#call-peer-name{font-size:23px;font-weight:700;margin-bottom:8px;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+#call-status-text{font-size:15px;opacity:.92;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+#call-quality{display:inline-flex;align-items:center;gap:5px;margin-top:10px;font-size:12.5px;opacity:.9}
+#call-quality .dot{width:8px;height:8px;border-radius:50%;background:#4caf50}
+#call-quality.medium .dot{background:#ffb300}
+#call-quality.bad .dot{background:#f44336}
+#call-controls{position:absolute;bottom:0;left:0;right:0;z-index:4;padding:26px 22px calc(30px + env(safe-area-inset-bottom));display:flex;justify-content:center;gap:22px;background:linear-gradient(0deg,rgba(0,0,0,.6),transparent)}
+.call-btn{width:62px;height:62px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.18);backdrop-filter:blur(6px);transition:transform .12s,background .15s}
+.call-btn:active{transform:scale(.9)}
+.call-btn svg{width:27px;height:27px;fill:#fff}
+.call-btn.off{background:#fff}
+.call-btn.off svg{fill:#0b141a}
+.call-btn.hangup{background:#f44336}
+.call-btn.accept{background:#4caf50}
+#call-incoming{position:fixed;inset:0;z-index:100001;background:rgba(11,20,26,.97);display:none;flex-direction:column;align-items:center;justify-content:center;color:#fff}
+#call-incoming.show{display:flex}
+#call-incoming .ring-avatar{width:124px;height:124px;border-radius:50%;background:linear-gradient(135deg,#2aabee,#1c84c6);display:flex;align-items:center;justify-content:center;font-size:58px;margin-bottom:24px;animation:callPulse 1.4s ease-in-out infinite}
+@keyframes callPulse{0%,100%{box-shadow:0 0 0 0 rgba(42,171,238,.55)}50%{box-shadow:0 0 0 24px rgba(42,171,238,0)}}
+#call-incoming .ring-name{font-size:24px;font-weight:700;margin-bottom:6px}
+#call-incoming .ring-sub{font-size:15px;opacity:.85;margin-bottom:48px}
+#call-incoming .ring-actions{display:flex;gap:64px}
+.ring-action{display:flex;flex-direction:column;align-items:center;gap:10px;font-size:13px;color:#fff;cursor:pointer}
+.call-hdr-btn{background:transparent;border:none;cursor:pointer;padding:6px;display:flex;align-items:center;justify-content:center}
+.call-hdr-btn svg{width:23px;height:23px;fill:var(--header-text,#fff)}
+</style>
+<div id="call-incoming">
+    <div class="ring-avatar" id="ring-avatar">📞</div>
+    <div class="ring-name" id="ring-name">تماس ورودی</div>
+    <div class="ring-sub" id="ring-sub">تماس صوتی</div>
+    <div class="ring-actions">
+        <div class="ring-action" onclick="declineIncoming()">
+            <button class="call-btn hangup"><svg viewBox="0 0 24 24"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.7l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.51-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg></button>
+            <span>رد تماس</span>
+        </div>
+        <div class="ring-action" onclick="acceptIncoming()">
+            <button class="call-btn accept"><svg viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1H7.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg></button>
+            <span>پاسخ</span>
+        </div>
+    </div>
+</div>
+<div id="call-screen">
+    <video id="call-remote-video" autoplay playsinline></video>
+    <video id="call-local-video" autoplay playsinline muted></video>
+    <audio id="call-remote-audio" autoplay></audio>
+    <div id="call-overlay-top">
+        <div id="call-avatar">👤</div>
+        <div id="call-peer-name">طرف مقابل</div>
+        <div id="call-status-text">در حال اتصال…</div>
+        <div id="call-quality"><span class="dot"></span><span id="call-quality-text">عالی</span></div>
+    </div>
+    <div id="call-controls">
+        <button class="call-btn" id="call-mic-btn" onclick="toggleMic()" title="میکروفون">
+            <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+        </button>
+        <button class="call-btn" id="call-cam-btn" onclick="toggleCam()" title="دوربین">
+            <svg viewBox="0 0 24 24"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+        </button>
+        <button class="call-btn hangup" onclick="hangupCall()" title="پایان تماس">
+            <svg viewBox="0 0 24 24"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08c-.18-.17-.29-.42-.29-.7 0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.7l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.51-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+        </button>
+    </div>
 </div>
 
 <script>
@@ -4071,6 +4465,437 @@ CHAT_PAGE = r"""
         });
     }
 
+    // ============================================================
+    // ============  تماس صوتی/تصویری (WebRTC)  ====================
+    // ============================================================
+    let iceConfig = { enabled:false, iceServers:[] };
+    let pc = null;
+    let localStream = null;
+    let callActive = false;        // تماس برقرار/در حال برقراری
+    let incomingActive = false;    // در حال زنگ خوردن (ورودی)
+    let callRole = null;           // 'caller' | 'callee'
+    let callKind = 'audio';        // 'audio' | 'video'
+    let incomingKind = 'audio';
+    let pendingOffer = null;       // offer دریافتی تا زمان پاسخ
+    let remoteCandQueue = [];       // candidateهای زودرس
+    let micOn = true, camOn = true;
+    let callPollSeq = 0;
+    let callTimerInt = null, callStartTs = 0;
+    let qualityInt = null;
+    let ringTimer = null, ringCtx = null;
+
+    function callEl(id){ return document.getElementById(id); }
+
+    // --- دریافت پیکربندی STUN/TURN؛ اگر سرور آماده نبود، دوباره تلاش می‌کند ---
+    async function loadIceServers(isRetry){
+        try{
+            const r = await fetch('/ice_servers', {cache:'no-store'});
+            const d = await r.json();
+            iceConfig = d || {enabled:false, iceServers:[]};
+        }catch(e){ iceConfig = {enabled:false, iceServers:[]}; }
+        const show = iceConfig.enabled ? '' : 'none';
+        const ab = callEl('call-audio-btn'), vb = callEl('call-video-btn');
+        if(ab) ab.style.display = show;
+        if(vb) vb.style.display = show;
+        // اگر هنوز فعال نشده (نصب TURN در جریان است) هر ۱۵ ثانیه دوباره بررسی کن
+        if(!iceConfig.enabled) setTimeout(()=>loadIceServers(true), 15000);
+        return iceConfig;
+    }
+
+    function rtcConfig(){
+        return { iceServers: iceConfig.iceServers || [], iceCandidatePoolSize: 4, bundlePolicy:'max-bundle' };
+    }
+
+    // --- ارسال سیگنال به طرف مقابل ---
+    async function signalSend(obj){
+        try{
+            await fetch('/call_signal', {method:'POST', headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({signal: obj})});
+        }catch(e){ console.error('signal send error', e); }
+    }
+
+    // --- حلقهٔ همیشه‌فعال long-poll برای دریافت سیگنال‌ها (حتی خارج از تماس، برای تماس ورودی) ---
+    async function callPollLoop(){
+        for(;;){
+            try{
+                const r = await fetch('/call_poll?since=' + callPollSeq, {cache:'no-store'});
+                if(r.status === 401){ await new Promise(s=>setTimeout(s,3000)); continue; }
+                const d = await r.json();
+                if(typeof d.seq === 'number') callPollSeq = d.seq;
+                if(d.signals && d.signals.length){
+                    for(const s of d.signals){ handleSignal(s.from, s.data); }
+                }
+            }catch(e){
+                await new Promise(s=>setTimeout(s, 2000));
+            }
+        }
+    }
+
+    // --- بهینه‌سازی کیفیت صدا (Opus): FEC برای مقاومت به packet loss، بیت‌ریت بالا، DTX خاموش ---
+    function tuneSdp(sdp){
+        const m = sdp.match(/a=rtpmap:(\d+) opus\/48000/i);
+        if(!m) return sdp;
+        const pt = m[1];
+        const opts = 'stereo=0;sprop-stereo=0;maxaveragebitrate=64000;maxplaybackrate=48000;useinbandfec=1;usedtx=0';
+        const fmtpRe = new RegExp('a=fmtp:' + pt + ' ([^\\r\\n]*)');
+        if(fmtpRe.test(sdp)){
+            sdp = sdp.replace(fmtpRe, function(mm, params){
+                const kept = params.split(';').filter(function(x){
+                    return !/^(stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate|useinbandfec|usedtx)=/.test(x.trim());
+                });
+                kept.push(opts);
+                return 'a=fmtp:' + pt + ' ' + kept.filter(Boolean).join(';');
+            });
+        }else{
+            sdp = sdp.replace(new RegExp('(a=rtpmap:' + pt + ' opus/48000[^\\r\\n]*\\r\\n)'),
+                '$1a=fmtp:' + pt + ' ' + opts + '\r\n');
+        }
+        return sdp;
+    }
+
+    // --- تنظیم بیت‌ریت/فریم‌ریت ویدیو روی sender برای کیفیت بالا و بدون لگ ---
+    async function tuneVideoSender(){
+        if(!pc) return;
+        for(const sender of pc.getSenders()){
+            if(sender.track && sender.track.kind === 'video'){
+                try{
+                    const p = sender.getParameters();
+                    if(!p.encodings || !p.encodings.length) p.encodings = [{}];
+                    p.encodings[0].maxBitrate = 2000000;     // ۲ مگابیت برای ۷۲۰p
+                    p.encodings[0].maxFramerate = 30;
+                    p.degradationPreference = 'balanced';
+                    await sender.setParameters(p);
+                }catch(e){}
+            }
+        }
+    }
+
+    function createPC(){
+        pc = new RTCPeerConnection(rtcConfig());
+        pc.onicecandidate = function(e){
+            if(e.candidate) signalSend({t:'cand', c:e.candidate});
+        };
+        pc.ontrack = function(e){
+            const stream = (e.streams && e.streams[0]) ? e.streams[0] : null;
+            if(!stream) return;
+            if(e.track.kind === 'video'){
+                const v = callEl('call-remote-video');
+                if(v.srcObject !== stream){ v.srcObject = stream; }
+            }else{
+                const a = callEl('call-remote-audio');
+                if(a.srcObject !== stream){ a.srcObject = stream; }
+            }
+        };
+        pc.onconnectionstatechange = function(){
+            if(!pc) return;
+            const st = pc.connectionState;
+            if(st === 'connected'){
+                onCallConnected();
+            }else if(st === 'failed'){
+                setCallStatus('اتصال قطع شد، تلاش مجدد…');
+                tryIceRestart();
+            }else if(st === 'disconnected'){
+                setCallStatus('اتصال ضعیف…');
+            }
+        };
+    }
+
+    async function tryIceRestart(){
+        // فقط تماس‌گیرنده offer جدید با restartIce می‌سازد تا از حلقه جلوگیری شود
+        if(callRole !== 'caller' || !pc) return;
+        try{
+            const offer = await pc.createOffer({iceRestart:true});
+            offer.sdp = tuneSdp(offer.sdp);
+            await pc.setLocalDescription(offer);
+            signalSend({t:'offer', sdp: pc.localDescription.sdp, kind: callKind});
+        }catch(e){}
+    }
+
+    async function getLocalMedia(kind){
+        const constraints = {
+            audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true },
+            video: (kind === 'video') ? {
+                width:{ideal:1280}, height:{ideal:720},
+                frameRate:{ideal:30, max:30}, facingMode:'user'
+            } : false
+        };
+        localStream = await navigator.mediaDevices.getUserMedia(constraints);
+        for(const track of localStream.getTracks()){ pc.addTrack(track, localStream); }
+        if(kind === 'video'){
+            const lv = callEl('call-local-video');
+            lv.srcObject = localStream;
+        }
+        micOn = true; camOn = (kind === 'video');
+        updateCallButtons();
+    }
+
+    // ---------------------- شروع تماس (تماس‌گیرنده) ----------------------
+    async function startCall(kind){
+        if(callActive || incomingActive) return;
+        await loadIceServers();   // اعتبارنامهٔ تازهٔ TURN
+        if(!iceConfig.enabled){ alert('تماس در حال حاضر در دسترس نیست.'); return; }
+        callKind = kind; callRole = 'caller'; callActive = true;
+        pendingOffer = null; remoteCandQueue = [];
+        try{
+            createPC();
+            await getLocalMedia(kind);
+            await tuneVideoSender();
+            showCallScreen(kind);
+            setCallStatus('در حال زنگ خوردن…');
+            signalSend({t:'invite', kind:kind});
+            const offer = await pc.createOffer();
+            offer.sdp = tuneSdp(offer.sdp);
+            await pc.setLocalDescription(offer);
+            signalSend({t:'offer', sdp: pc.localDescription.sdp, kind:kind});
+            startRingback();
+        }catch(e){
+            console.error('startCall error', e);
+            alert('دسترسی به دوربین/میکروفون ممکن نشد.');
+            endCall();
+        }
+    }
+
+    // ---------------------- مدیریت سیگنال‌های دریافتی ----------------------
+    async function handleSignal(from, d){
+        if(!d || !d.t) return;
+        if(d.t === 'invite'){
+            if(callActive || incomingActive){ signalSend({t:'busy'}); return; }
+            incomingActive = true; incomingKind = d.kind || 'audio';
+            showIncoming(incomingKind);
+            startRingtone();
+            return;
+        }
+        if(d.t === 'offer'){
+            if(callActive && pc){
+                // مذاکرهٔ مجدد یا restartIce
+                try{
+                    await pc.setRemoteDescription({type:'offer', sdp:d.sdp});
+                    await flushCands();
+                    const ans = await pc.createAnswer();
+                    ans.sdp = tuneSdp(ans.sdp);
+                    await pc.setLocalDescription(ans);
+                    signalSend({t:'answer', sdp: pc.localDescription.sdp});
+                }catch(e){ console.error(e); }
+            }else{
+                pendingOffer = d.sdp;   // تا زمان پاسخ نگه دار
+            }
+            return;
+        }
+        if(d.t === 'answer'){
+            if(pc){
+                try{ await pc.setRemoteDescription({type:'answer', sdp:d.sdp}); await flushCands(); }
+                catch(e){ console.error(e); }
+            }
+            return;
+        }
+        if(d.t === 'cand'){
+            await addRemoteCandidate(d.c);
+            return;
+        }
+        if(d.t === 'busy'){ setCallStatus('مخاطب مشغول است'); setTimeout(()=>endCall(), 1500); return; }
+        if(d.t === 'decline'){ setCallStatus('تماس رد شد'); setTimeout(()=>endCall(), 1200); return; }
+        if(d.t === 'hangup'){ endCall(); return; }
+    }
+
+    async function addRemoteCandidate(c){
+        if(!c) return;
+        if(pc && pc.remoteDescription && pc.remoteDescription.type){
+            try{ await pc.addIceCandidate(c); }catch(e){}
+        }else{
+            remoteCandQueue.push(c);
+        }
+    }
+    async function flushCands(){
+        const q = remoteCandQueue; remoteCandQueue = [];
+        for(const c of q){ try{ await pc.addIceCandidate(c); }catch(e){} }
+    }
+
+    // ---------------------- پاسخ به تماس (گیرنده) ----------------------
+    async function acceptIncoming(){
+        if(!incomingActive) return;
+        incomingActive = false; stopRingtone(); hideIncoming();
+        await loadIceServers();
+        if(!iceConfig.enabled){ endCall(); return; }
+        callKind = incomingKind; callRole = 'callee'; callActive = true;
+        remoteCandQueue = [];
+        try{
+            createPC();
+            await getLocalMedia(callKind);
+            await tuneVideoSender();
+            showCallScreen(callKind);
+            setCallStatus('در حال اتصال…');
+            // منتظر رسیدن offer (ممکن است کمی دیرتر از invite برسد)
+            for(let i=0; i<50 && !pendingOffer; i++){ await new Promise(s=>setTimeout(s,100)); }
+            if(!pendingOffer){ endCall(); return; }
+            await pc.setRemoteDescription({type:'offer', sdp:pendingOffer});
+            pendingOffer = null;
+            await flushCands();
+            const ans = await pc.createAnswer();
+            ans.sdp = tuneSdp(ans.sdp);
+            await pc.setLocalDescription(ans);
+            signalSend({t:'answer', sdp: pc.localDescription.sdp});
+        }catch(e){
+            console.error('accept error', e);
+            alert('دسترسی به دوربین/میکروفون ممکن نشد.');
+            endCall();
+        }
+    }
+
+    function declineIncoming(){
+        if(!incomingActive) return;
+        incomingActive = false; stopRingtone(); hideIncoming();
+        signalSend({t:'decline'});
+    }
+
+    function hangupCall(){
+        signalSend({t:'hangup'});
+        endCall();
+    }
+
+    function onCallConnected(){
+        stopRingback();
+        if(!callStartTs){
+            callStartTs = Date.now();
+            if(callTimerInt) clearInterval(callTimerInt);
+            callTimerInt = setInterval(updateCallTimer, 1000);
+            updateCallTimer();
+            if(qualityInt) clearInterval(qualityInt);
+            qualityInt = setInterval(monitorQuality, 2000);
+        }
+    }
+
+    function updateCallTimer(){
+        if(!callStartTs) return;
+        const s = Math.floor((Date.now() - callStartTs)/1000);
+        const mm = String(Math.floor(s/60)).padStart(2,'0');
+        const ss = String(s%60).padStart(2,'0');
+        setCallStatus(mm + ':' + ss);
+    }
+
+    async function monitorQuality(){
+        if(!pc) return;
+        try{
+            const stats = await pc.getStats();
+            let rtt = 0, fl = 0, hasFl = false;
+            stats.forEach(function(r){
+                if(r.type === 'candidate-pair' && r.state === 'succeeded' && r.currentRoundTripTime != null) rtt = r.currentRoundTripTime;
+                if(r.type === 'remote-inbound-rtp' && r.fractionLost != null){ fl = r.fractionLost; hasFl = true; }
+            });
+            let q = 'good';
+            if((hasFl && fl > 0.08) || rtt > 0.4) q = 'bad';
+            else if((hasFl && fl > 0.03) || rtt > 0.2) q = 'medium';
+            setQuality(q);
+        }catch(e){}
+    }
+
+    function setQuality(q){
+        const el = callEl('call-quality');
+        if(!el) return;
+        el.classList.remove('medium','bad');
+        if(q === 'medium') el.classList.add('medium');
+        else if(q === 'bad') el.classList.add('bad');
+        callEl('call-quality-text').textContent = (q==='good'?'کیفیت عالی':(q==='medium'?'کیفیت متوسط':'کیفیت ضعیف'));
+    }
+
+    // ---------------------- کنترل‌ها ----------------------
+    function toggleMic(){
+        if(!localStream) return;
+        micOn = !micOn;
+        localStream.getAudioTracks().forEach(t=>t.enabled = micOn);
+        updateCallButtons();
+    }
+    function toggleCam(){
+        if(!localStream) return;
+        const vts = localStream.getVideoTracks();
+        if(!vts.length) return;
+        camOn = !camOn;
+        vts.forEach(t=>t.enabled = camOn);
+        updateCallButtons();
+    }
+    function updateCallButtons(){
+        const mb = callEl('call-mic-btn'), cb = callEl('call-cam-btn');
+        if(mb) mb.classList.toggle('off', !micOn);
+        if(cb){
+            cb.classList.toggle('off', !camOn);
+            cb.style.display = (callKind === 'video') ? '' : 'none';
+        }
+        const lv = callEl('call-local-video');
+        if(lv) lv.style.opacity = camOn ? '1' : '0';
+    }
+
+    // ---------------------- UI ----------------------
+    function showCallScreen(kind){
+        const sc = callEl('call-screen');
+        sc.classList.toggle('audio-only', kind !== 'video');
+        sc.classList.add('show');
+        callEl('call-peer-name').textContent = (document.getElementById('room-title')||{}).textContent || 'طرف مقابل';
+        setQuality('good');
+        updateCallButtons();
+    }
+    function showIncoming(kind){
+        callEl('ring-name').textContent = (document.getElementById('room-title')||{}).textContent || 'تماس ورودی';
+        callEl('ring-sub').textContent = (kind === 'video') ? 'تماس تصویری ورودی…' : 'تماس صوتی ورودی…';
+        callEl('ring-avatar').textContent = (kind === 'video') ? '🎥' : '📞';
+        callEl('call-incoming').classList.add('show');
+    }
+    function hideIncoming(){ callEl('call-incoming').classList.remove('show'); }
+
+    function endCall(){
+        try{ if(pc){ pc.onicecandidate=null; pc.ontrack=null; pc.onconnectionstatechange=null; pc.close(); } }catch(e){}
+        pc = null;
+        if(localStream){ localStream.getTracks().forEach(t=>{ try{t.stop();}catch(e){} }); localStream = null; }
+        callActive = false; incomingActive = false; callRole = null;
+        pendingOffer = null; remoteCandQueue = []; callStartTs = 0;
+        if(callTimerInt){ clearInterval(callTimerInt); callTimerInt = null; }
+        if(qualityInt){ clearInterval(qualityInt); qualityInt = null; }
+        stopRingback(); stopRingtone();
+        const rv = callEl('call-remote-video'), lv = callEl('call-local-video'), ra = callEl('call-remote-audio');
+        if(rv) rv.srcObject = null;
+        if(lv) lv.srcObject = null;
+        if(ra) ra.srcObject = null;
+        callEl('call-screen').classList.remove('show');
+        hideIncoming();
+    }
+
+    // ---------------------- زنگ (WebAudio، بدون فایل خارجی) ----------------------
+    function ensureRingCtx(){
+        if(!ringCtx){
+            try{ ringCtx = new (window.AudioContext || window.webkitAudioContext)(); }catch(e){ ringCtx = null; }
+        }
+        if(ringCtx && ringCtx.state === 'suspended'){ try{ ringCtx.resume(); }catch(e){} }
+        return ringCtx;
+    }
+    function beep(freq, dur, vol){
+        const ctx = ensureRingCtx(); if(!ctx) return;
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.value = freq; o.type = 'sine';
+        g.gain.value = vol || 0.18;
+        o.connect(g); g.connect(ctx.destination);
+        o.start();
+        g.gain.setValueAtTime(g.gain.value, ctx.currentTime + dur*0.7);
+        g.gain.linearRampToValueAtTime(0, ctx.currentTime + dur);
+        o.stop(ctx.currentTime + dur);
+    }
+    function startRingtone(){   // آهنگ تماس ورودی
+        stopRingtone();
+        const play = ()=>{ beep(880,0.35); setTimeout(()=>beep(660,0.35), 420); };
+        play(); ringTimer = setInterval(play, 1600);
+    }
+    function startRingback(){   // بوق انتظار برای تماس‌گیرنده
+        stopRingback();
+        const play = ()=>beep(440,0.4,0.12);
+        play(); ringTimer = setInterval(play, 2500);
+    }
+    function stopRingtone(){ if(ringTimer){ clearInterval(ringTimer); ringTimer = null; } }
+    function stopRingback(){ if(ringTimer){ clearInterval(ringTimer); ringTimer = null; } }
+
+    function setCallStatus(t){ const el = callEl('call-status-text'); if(el) el.textContent = t; }
+
+    // راه‌اندازی اولیهٔ زیرسیستم تماس
+    loadIceServers();
+    callPollLoop();
+    window.addEventListener('beforeunload', function(){ if(callActive) signalSend({t:'hangup'}); });
+
 </script>
 </body>
 </html>
@@ -4198,6 +5023,10 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
             elif u.path == '/get_messages':
                 self.handle_get_messages(u.query)
+            elif u.path == '/ice_servers':
+                self.handle_ice_servers()
+            elif u.path == '/call_poll':
+                self.handle_call_poll(u.query)
             elif u.path == '/scheduled_list':
                 self.handle_scheduled_list()
             elif u.path.startswith('/media/'):
@@ -4442,6 +5271,8 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 self.handle_schedule_message(body)
             elif parsed_url.path == '/cancel_scheduled':
                 self.handle_cancel_scheduled(body)
+            elif parsed_url.path == '/call_signal':
+                self.handle_call_signal(body)
 
         except Exception as e:
             logger.error(f"خطا در POST {self.path}: {e}")
@@ -4777,6 +5608,43 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         with LOCKED:
             st['typing'][body['u_id']] = time.time()
 
+    # ---------------------- تماس صوتی/تصویری (WebRTC) ----------------------
+    def handle_ice_servers(self):
+        """پیکربندی STUN/TURN با اعتبارنامهٔ موقت برای مرورگر."""
+        session = self.get_user_from_cookie()
+        if not session:
+            self.send_json_response({"enabled": False}, 401)
+            return
+        host = (self.headers.get('Host', '').split(':')[0] or '').strip()
+        self.send_json_response(build_ice_servers(host))
+
+    def handle_call_poll(self, query):
+        """long-poll دریافت سیگنال‌های تماس برای کاربر فعلی."""
+        session = self.get_user_from_cookie()
+        if not session:
+            self.send_json_response({"error": "unauthorized"}, 401)
+            return
+        room_id, role = session
+        p = urllib.parse.parse_qs(query)
+        try:
+            since = int(p.get('since', ['0'])[0])
+        except (TypeError, ValueError):
+            since = 0
+        seq, items = fetch_signals(room_id, role, since)
+        self.send_json_response({
+            "seq": seq,
+            "signals": [{"from": it['frm'], "data": it['data']} for it in items],
+        })
+
+    def handle_call_signal(self, body):
+        """ارسال یک سیگنال تماس به طرف مقابلِ همین اتاق."""
+        room_id = body['room_id']
+        role = body['sender_id']
+        other = 'guest' if role == 'admin' else 'admin'
+        data = body.get('signal')
+        if data is not None:
+            push_signal(room_id, role, other, data)
+
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
@@ -4797,6 +5665,9 @@ if __name__ == "__main__":
     threading.Thread(target=clean_typing, daemon=True).start()
     threading.Thread(target=cleanup_data, daemon=True).start()
     threading.Thread(target=deliver_scheduled_messages, daemon=True).start()
+
+    # راه‌اندازی خودکار TURN در پس‌زمینه (غیرکشنده؛ اگر شکست بخورد فقط تماس غیرفعال می‌شود)
+    threading.Thread(target=setup_turn, daemon=True).start()
     
     # شروع سرور
     with ThreadingHTTPServer(("0.0.0.0", PORT), ChatHandler) as httpd:
