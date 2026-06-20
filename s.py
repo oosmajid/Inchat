@@ -421,6 +421,29 @@ def setup_turn():
         logger.error(f"TURN: خطای غیرمنتظره: {e}؛ اصل اپ بدون تماس ادامه می‌دهد")
 
 
+def open_firewall_ports(https_port):
+    """باز کردن خودکار پورت‌های لازم در ufw (وب + STUN/TURN + رنج رله).
+    فقط قانون allow اضافه می‌کند و هرگز ufw را enable نمی‌کند (تا اتصال SSH قطع نشود).
+    اگر ufw نصب/فعال نباشد بی‌اثر و بی‌خطر است."""
+    try:
+        if not _is_root() or not shutil.which("ufw"):
+            return
+        ports = [f"{https_port}/tcp",
+                 f"{TURN_PORT}/tcp", f"{TURN_PORT}/udp",
+                 f"{TURN_MIN_PORT}:{TURN_MAX_PORT}/udp"]
+        for p in ports:
+            _run(["ufw", "allow", p], timeout=30)
+        # وضعیت ufw را هم لاگ کن (اگر غیرفعال بود، قوانین فقط ذخیره می‌شوند)
+        try:
+            st = subprocess.run(["ufw", "status"], stdout=subprocess.PIPE,
+                                text=True, timeout=15).stdout.split("\n")[0]
+        except Exception:
+            st = ""
+        logger.info(f"FIREWALL: پورت‌های ufw باز شد ({', '.join(ports)}) {('- ' + st) if st else ''}")
+    except Exception as e:
+        logger.warning(f"FIREWALL: تنظیم خودکار ufw ناموفق: {e}")
+
+
 # --- صندوق سیگنالینگ تماس (in-memory، long-poll) ---
 def _call_state(room_id):
     st = CALL_SIGNALS.get(room_id)
@@ -6178,6 +6201,9 @@ if __name__ == "__main__":
     if bound_port != eff_port:
         logger.warning(f"به‌جای پورت {eff_port} روی پورت {bound_port} اجرا شد "
                        f"(برای URL بدون پورت روی 443، با sudo اجرا کن و پورت را آزاد نگه دار)")
+
+    # باز کردن خودکار پورت‌های لازم در فایروال محلی (ufw)
+    open_firewall_ports(bound_port)
 
     scheme = "http"
     if cert_file and key_file and os.path.isfile(cert_file) and os.path.isfile(key_file):
