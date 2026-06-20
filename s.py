@@ -12,6 +12,7 @@ import hmac
 import secrets
 import re
 import html
+import sys
 import base64
 import socket
 import shutil
@@ -37,6 +38,9 @@ PORT = int(os.environ.get("PORT", "2026") or "2026")
 # (برای دسترسی مرورگر به دوربین/میکروفون لازم است؛ getUserMedia فقط روی بستر امن کار می‌کند)
 SSL_CERTFILE = os.environ.get("SSL_CERTFILE", "").strip()
 SSL_KEYFILE = os.environ.get("SSL_KEYFILE", "").strip()
+# فایل پیکربندی و محل گواهی‌ها (برای ویزارد نصب آفلاین)
+CONFIG_FILE = os.environ.get("INCHAT_CONFIG", "inchat_config.json")
+CERT_DIR = os.environ.get("CERT_DIR", "certs")
 MAX_MESSAGES_IN_MEMORY = 500  # حداکثر تعداد پیام در حافظه
 MESSAGE_EXPIRY_HOURS = 24  # مدت زمان نگهداری پیام‌ها
 
@@ -452,6 +456,291 @@ def fetch_signals(room_id, role, since_seq, timeout=20):
             if remaining <= 0:
                 return st['seq'], []
             CALL_COND.wait(timeout=remaining)
+
+
+# ==========================================================================
+# ===  ویزارد نصب آفلاین: دامنه + HTTPS بدون هیچ سرویس خارجی  ==============
+# ==========================================================================
+# طراحی برای سرور ایرانی بدون دسترسی به اینترنت بین‌الملل:
+#   • هیچ وابستگی به Let's Encrypt/سرویس خارجی نیست (همه‌چیز محلی).
+#   • گواهی TLS: اگر فایل معتبر گذاشته شده باشد از آن استفاده می‌کند،
+#     وگرنه یک گواهی self-signed به‌صورت آفلاین می‌سازد (با openssl).
+#   • برای URL بدون پورت، روی 443 می‌نشیند (در صورت اجرا با root).
+
+def _load_app_config():
+    try:
+        if os.path.isfile(CONFIG_FILE):
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                return json.load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_app_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"WIZARD: ذخیرهٔ پیکربندی ناموفق: {e}")
+
+
+def _ensure_openssl():
+    if shutil.which("openssl"):
+        return True
+    if shutil.which("apt-get") and _is_root():
+        _run(["apt-get", "install", "-y", "openssl"], timeout=300,
+             env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+    return bool(shutil.which("openssl"))
+
+
+def _generate_self_signed(cn, cert_path, key_path):
+    """ساخت گواهی self-signed کاملاً آفلاین با openssl (اعتبار ۱۰ سال)."""
+    if not _ensure_openssl():
+        logger.error("WIZARD: openssl در دسترس نیست؛ ساخت گواهی ممکن نشد")
+        return False
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(cert_path)), exist_ok=True)
+        ip = _detect_public_ip()
+        cn = (cn or ip).strip()
+        san = f"subjectAltName=DNS:{cn},IP:{ip}" if cn and not cn.replace('.', '').isdigit() \
+              else f"subjectAltName=IP:{ip}"
+        base = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key_path, "-out", cert_path, "-days", "3650",
+                "-subj", f"/CN={cn}"]
+        ok = _run(base + ["-addext", san], timeout=120)   # OpenSSL 3.x (Ubuntu)
+        if not (ok and os.path.isfile(cert_path) and os.path.isfile(key_path)):
+            ok = _run(base, timeout=120)                    # fallback اگر -addext پشتیبانی نشد
+        return ok and os.path.isfile(cert_path) and os.path.isfile(key_path)
+    except Exception as e:
+        logger.error(f"WIZARD: ساخت گواهی self-signed ناموفق: {e}")
+        return False
+
+
+def _has_international():
+    """بررسی سریع دسترسی به اینترنت بین‌الملل (سرور ACME لتس‌انکریپت)."""
+    if os.environ.get("NO_LETSENCRYPT") == "1":
+        return False
+    for host in ("acme-v02.api.letsencrypt.org", "letsencrypt.org"):
+        try:
+            s = socket.create_connection((host, 443), timeout=4)
+            s.close()
+            return True
+        except Exception:
+            pass
+    return False
+
+
+def _ensure_certbot():
+    if shutil.which("certbot"):
+        return True
+    if shutil.which("apt-get") and _is_root():
+        _run(["apt-get", "install", "-y", "certbot"], timeout=300,
+             env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+    return bool(shutil.which("certbot"))
+
+
+def _obtain_letsencrypt(domain):
+    """مسیر عادی: دریافت گواهی معتبر از Let's Encrypt (HTTP-01 standalone، پورت ۸۰).
+    نیازمند: root، دسترسی بین‌الملل، و رکورد A دامنه به این سرور. در غیر این صورت None."""
+    if not _is_root():
+        logger.warning("LE: برای گرفتن گواهی Let's Encrypt به root نیاز است")
+        return None
+    if not _ensure_certbot():
+        logger.warning("LE: certbot در دسترس نیست")
+        return None
+    cert = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
+    key = f"/etc/letsencrypt/live/{domain}/privkey.pem"
+    if os.path.isfile(cert) and os.path.isfile(key):
+        return cert, key
+    try:
+        email = os.environ.get("LE_EMAIL", "").strip()
+        cmd = ["certbot", "certonly", "--standalone", "--non-interactive",
+               "--agree-tos", "--http-01-port", "80", "-d", domain,
+               "--keep-until-expiring"]
+        cmd += (["-m", email] if email else ["--register-unsafely-without-email"])
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=150)
+        if r.returncode == 0 and os.path.isfile(cert) and os.path.isfile(key):
+            return cert, key
+        tail = (r.stdout or b"").decode("utf-8", "ignore")[-300:]
+        logger.warning(f"LE: certbot ناموفق: {tail}")
+    except subprocess.TimeoutExpired:
+        logger.warning("LE: certbot timeout (اینترنت بین‌الملل کند/قطع)")
+    except Exception as e:
+        logger.warning(f"LE: خطا: {e}")
+    return None
+
+
+def _obtain_cert(domain, cert_path, key_path, announce=None):
+    """تعیین گواهی به ترتیب اولویت:
+       ۱) فایل آمادهٔ موجود در certs/
+       ۲) Let's Encrypt (مسیر عادی، در صورت دسترسی به اینترنت بین‌الملل + دامنه)
+       ۳) self-signed آفلاین (مسیر جایگزین ایرانی)
+    برمی‌گرداند (cert, key) یا None."""
+    say = announce or (lambda m: logger.info(m))
+    # ۱) گواهی آمادهٔ کاربر
+    if os.path.isfile(cert_path) and os.path.isfile(key_path):
+        say("استفاده از گواهیِ موجود در پوشهٔ certs/")
+        return cert_path, key_path
+    # ۲) Let's Encrypt — فقط اگر دامنهٔ واقعی داریم و اینترنت بین‌الملل وصل است
+    is_real_domain = bool(domain) and not domain.replace('.', '').isdigit()
+    if is_real_domain:
+        if _has_international():
+            say("تلاش برای دریافت گواهی معتبر از Let's Encrypt (مسیر عادی)…")
+            le = _obtain_letsencrypt(domain)
+            if le:
+                say("✓ گواهی معتبر Let's Encrypt گرفته شد (بدون اخطار مرورگر).")
+                return le
+            say("Let's Encrypt ناموفق بود؛ رفتن به مسیر جایگزین آفلاین (self-signed).")
+        else:
+            say("اینترنت بین‌الملل در دسترس نیست؛ مسیر جایگزین آفلاین (self-signed).")
+    # ۳) self-signed آفلاین
+    os.makedirs(CERT_DIR, exist_ok=True)
+    if _generate_self_signed(domain, cert_path, key_path):
+        say("✓ گواهی self-signed آفلاین ساخته شد (بار اول مرورگر اخطار می‌دهد → Proceed).")
+        return cert_path, key_path
+    return None
+
+
+def _cert_reload_loop(server, cert_file, key_file):
+    """اگر بعداً گواهی معتبر را جایگزین کردی، بدون ری‌استارت آن را برمی‌دارد."""
+    try:
+        last = os.path.getmtime(cert_file)
+    except Exception:
+        last = None
+    while True:
+        time.sleep(6 * 3600)
+        try:
+            mtime = os.path.getmtime(cert_file)
+            if last is not None and mtime != last:
+                import ssl
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+                server.ssl_context = ctx
+                last = mtime
+                logger.info("TLS: گواهی به‌روزرسانی شد")
+            elif last is None:
+                last = mtime
+        except Exception:
+            pass
+
+
+def _interactive_wizard(cfg):
+    """ویزارد تعاملی ترمینال: دامنه، راهنمای DNS (آروان/کلادفلر)، تأیید، روشن‌شدن."""
+    pub_ip = _detect_public_ip()
+    print("\n" + "=" * 62)
+    print("  راه‌اندازی این‌چت — تنظیم دامنه و HTTPS (فقط بار اول)")
+    print("=" * 62)
+    print("برای تماس صوتی/تصویری، مرورگر فقط روی HTTPS اجازهٔ دسترسی به")
+    print("دوربین/میکروفون می‌دهد. این مرحله یک‌بار آن را آماده می‌کند.")
+    print(f"\n  IP این سرور: {pub_ip}\n")
+
+    domain = (cfg.get("domain") or "").strip()
+    try:
+        ans = input("۱) دامنه را وارد کن (مثلاً call.example.com)\n"
+                    "   [Enter = استفاده از همین IP بدون دامنه]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        ans = ""
+    if ans:
+        domain = ans
+    cfg["domain"] = domain
+    host_for_url = domain or pub_ip
+
+    if domain:
+        print("\n" + "-" * 62)
+        print("۲) در پنل DNS خودت (ابرآروان یا کلادفلر) این رکورد A را بساز:")
+        print(f"     نوع:    A")
+        print(f"     نام:    {domain}")
+        print(f"     مقدار:  {pub_ip}")
+        print("   ⚠ حالت پروکسی/ابر را «خاموش» بگذار (آروان: ابر خاکستری /")
+        print("     کلادفلر: DNS only). با ابرِ روشن، تماس (TURN/UDP) کار نمی‌کند.")
+        print("-" * 62)
+        try:
+            input("   وقتی رکورد A را ساختی، Enter بزن تا ادامه دهیم... ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+
+    default_port = 443 if _is_root() else 8443
+    try:
+        pans = input(f"\n۳) پورت HTTPS [{default_port}] "
+                     f"(برای آدرس بدون پورت، 443 را نگه دار): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        pans = ""
+    https_port = int(pans) if pans.isdigit() else default_port
+    if https_port < 1024 and not _is_root():
+        print(f"   ⚠ پورت {https_port} نیاز به root دارد؛ به 8443 تغییر یافت "
+              f"(برای 443 با sudo اجرا کن).")
+        https_port = 8443
+    cfg["https_port"] = https_port
+
+    cert_path = os.path.join(CERT_DIR, "fullchain.pem")
+    key_path = os.path.join(CERT_DIR, "privkey.pem")
+    os.makedirs(CERT_DIR, exist_ok=True)
+    print("\n۴) گواهی TLS — ترتیب: گواهیِ آماده ← Let's Encrypt (اگر اینترنت بین‌الملل")
+    print("   وصل بود) ← گواهی self-signed آفلاین. اگر گواهی معتبر داری می‌توانی این دو")
+    print(f"   فایل را بگذاری: {os.path.abspath(cert_path)} و {os.path.abspath(key_path)}\n")
+
+    got = _obtain_cert(domain, cert_path, key_path, announce=lambda m: print("   " + m))
+    if got:
+        cfg["cert"], cfg["key"] = got[0], got[1]
+        _save_app_config(cfg)
+        port_disp = "" if https_port == 443 else f":{https_port}"
+        print("\n" + "=" * 62)
+        print(f"  ✅ آماده است! آدرس دسترسی:  https://{host_for_url}{port_disp}")
+        print("=" * 62 + "\n")
+        return https_port, got[0], got[1]
+    else:
+        print("   ✗ تهیهٔ گواهی ناموفق بود. روی HTTP ادامه می‌دهم؛ تماس کار نخواهد کرد.")
+        _save_app_config(cfg)
+        return https_port, None, None
+
+
+def resolve_tls_and_port():
+    """تعیین پورت و گواهی TLS — آفلاین و بدون سرویس خارجی.
+    برمی‌گرداند: (port, certfile|None, keyfile|None)."""
+    try:
+        cfg = _load_app_config()
+        port = PORT
+
+        # ۱) override صریح با متغیر محیطی (برای systemd/حالت پیشرفته)
+        if SSL_CERTFILE and SSL_KEYFILE and os.path.isfile(SSL_CERTFILE) and os.path.isfile(SSL_KEYFILE):
+            return port, SSL_CERTFILE, SSL_KEYFILE
+
+        cert_path = cfg.get("cert") or os.path.join(CERT_DIR, "fullchain.pem")
+        key_path = cfg.get("key") or os.path.join(CERT_DIR, "privkey.pem")
+        if "PORT" not in os.environ and cfg.get("https_port"):
+            port = int(cfg.get("https_port"))
+            # اگر پورت ذخیره‌شده <1024 است ولی الان root نیستیم، به 8443 برگرد
+            # (وگرنه bind روی 443 بدون root کرش می‌کند)
+            if port < 1024 and not _is_root():
+                logger.warning(f"WIZARD: پورت {port} نیاز به root دارد و الان root نیستیم؛ از 8443 استفاده می‌شود")
+                port = 8443
+
+        have_cert = os.path.isfile(cert_path) and os.path.isfile(key_path)
+
+        # ۲) گواهی از قبل آماده است → همان
+        if have_cert:
+            return port, cert_path, key_path
+
+        interactive = (sys.stdin and sys.stdin.isatty() and
+                       sys.stdout and sys.stdout.isatty() and
+                       os.environ.get("NO_WIZARD") != "1")
+
+        # ۳) ویزارد تعاملی (بار اول روی سرور)
+        if interactive:
+            return _interactive_wizard(cfg)
+
+        # ۴) غیرتعاملی و بدون گواهی → همان ترتیب: Let's Encrypt (اگر بین‌الملل وصل بود) ← self-signed
+        got = _obtain_cert(cfg.get("domain") or "", cert_path, key_path)
+        if got:
+            return port, got[0], got[1]
+        logger.warning("WIZARD: گواهی نداریم؛ روی HTTP اجرا می‌شود (تماس کار نخواهد کرد)")
+        return port, None, None
+    except Exception as e:
+        logger.error(f"WIZARD: خطای غیرمنتظره: {e}؛ روی HTTP ادامه می‌دهد")
+        return PORT, None, None
+
 
 # --- کلید رمزنگاری AES-like (ساده‌شده برای سازگاری با مرورگر) ---
 # نکته: برای امنیت بیشتر باید از Web Crypto API استفاده شود
@@ -2058,10 +2347,17 @@ CHAT_PAGE = r"""
 <style>
 #call-screen{position:fixed;inset:0;z-index:100000;background:#0b141a;display:none;flex-direction:column;overflow:hidden}
 #call-screen.show{display:flex}
-#call-remote-video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#0b141a}
-#call-screen.audio-only #call-remote-video{display:none}
-#call-local-video{position:absolute;top:18px;left:18px;width:104px;height:150px;object-fit:cover;border-radius:14px;background:#1b2a33;box-shadow:0 6px 20px rgba(0,0,0,.45);z-index:3;transform:scaleX(-1);transition:opacity .2s}
-#call-screen.audio-only #call-local-video{display:none}
+/* ناحیهٔ بزرگ (پس‌زمینه) — object-fit:contain تا تصویر موبایل کشیده/زوم نشود */
+#call-big{position:absolute;inset:0;z-index:1;background:#0b141a}
+#call-big video{width:100%;height:100%;object-fit:contain;background:#0b141a}
+/* تصویر کوچک قابل‌جابه‌جایی (PiP) */
+#call-pip{position:absolute;top:18px;right:18px;width:31vw;max-width:132px;aspect-ratio:9/16;border-radius:16px;overflow:hidden;z-index:3;background:#1b2a33;box-shadow:0 6px 22px rgba(0,0,0,.5);cursor:grab;touch-action:none;transition:opacity .2s;user-select:none}
+#call-pip:active{cursor:grabbing}
+#call-pip video{width:100%;height:100%;object-fit:cover;pointer-events:none}
+#call-pip #call-local-video{transform:scaleX(-1)}   /* تصویر خودم فقط در حالت کوچک آینه‌ای */
+#call-screen.audio-only #call-big,#call-screen.audio-only #call-pip{display:none}
+/* وقتی تصویر خودم تمام‌صفحه است و دوربین خاموش → به‌جای صفحهٔ سیاه، نشانگر نمایش بده */
+#call-camoff{position:absolute;inset:0;z-index:2;display:none;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:#0b141a;color:#9fb3c8;font-size:16px}
 #call-overlay-top{position:absolute;top:0;left:0;right:0;z-index:4;padding:34px 22px 60px;text-align:center;color:#fff;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent);pointer-events:none}
 #call-avatar{width:118px;height:118px;border-radius:50%;margin:6vh auto 18px;background:linear-gradient(135deg,#2aabee,#1c84c6);display:flex;align-items:center;justify-content:center;font-size:54px;color:#fff;box-shadow:0 10px 40px rgba(0,0,0,.5)}
 #call-screen:not(.audio-only) #call-avatar{display:none}
@@ -2071,14 +2367,22 @@ CHAT_PAGE = r"""
 #call-quality .dot{width:8px;height:8px;border-radius:50%;background:#4caf50}
 #call-quality.medium .dot{background:#ffb300}
 #call-quality.bad .dot{background:#f44336}
-#call-controls{position:absolute;bottom:0;left:0;right:0;z-index:4;padding:26px 22px calc(30px + env(safe-area-inset-bottom));display:flex;justify-content:center;gap:22px;background:linear-gradient(0deg,rgba(0,0,0,.6),transparent)}
-.call-btn{width:62px;height:62px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.18);backdrop-filter:blur(6px);transition:transform .12s,background .15s}
+#call-controls{position:absolute;bottom:0;left:0;right:0;z-index:5;padding:26px 18px calc(30px + env(safe-area-inset-bottom));display:flex;justify-content:center;gap:16px;background:linear-gradient(0deg,rgba(0,0,0,.6),transparent)}
+.call-btn{width:58px;height:58px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.18);backdrop-filter:blur(6px);transition:transform .12s,background .15s;font-size:25px;color:#fff}
 .call-btn:active{transform:scale(.9)}
-.call-btn svg{width:27px;height:27px;fill:#fff}
+.call-btn svg{width:26px;height:26px;fill:#fff}
 .call-btn.off{background:#fff}
 .call-btn.off svg{fill:#0b141a}
 .call-btn.hangup{background:#f44336}
 .call-btn.accept{background:#4caf50}
+/* نوار واکنش (ری‌اکشن) داخل تماس */
+#call-react-bar{position:absolute;bottom:calc(116px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) scale(.85);z-index:6;display:flex;gap:4px;padding:8px 12px;border-radius:32px;background:rgba(0,0,0,.55);backdrop-filter:blur(10px);opacity:0;pointer-events:none;transition:all .18s}
+#call-react-bar.show{opacity:1;pointer-events:auto;transform:translateX(-50%) scale(1)}
+#call-react-bar span{font-size:27px;cursor:pointer;line-height:1;transition:transform .12s;padding:2px}
+#call-react-bar span:active{transform:scale(1.5)}
+/* ایموجی شناور هنگام واکنش */
+.call-float-emoji{position:absolute;bottom:120px;z-index:6;font-size:42px;pointer-events:none;will-change:transform,opacity;animation:callFloat 2.6s ease-out forwards}
+@keyframes callFloat{0%{transform:translateY(0) scale(.5);opacity:0}12%{opacity:1;transform:translateY(-14px) scale(1.15)}100%{transform:translateY(-58vh) scale(1);opacity:0}}
 #call-incoming{position:fixed;inset:0;z-index:100001;background:rgba(11,20,26,.97);display:none;flex-direction:column;align-items:center;justify-content:center;color:#fff}
 #call-incoming.show{display:flex}
 #call-incoming .ring-avatar{width:124px;height:124px;border-radius:50%;background:linear-gradient(135deg,#2aabee,#1c84c6);display:flex;align-items:center;justify-content:center;font-size:58px;margin-bottom:24px;animation:callPulse 1.4s ease-in-out infinite}
@@ -2108,8 +2412,9 @@ CHAT_PAGE = r"""
     </div>
 </div>
 <div id="call-screen">
-    <video id="call-remote-video" autoplay playsinline></video>
-    <video id="call-local-video" autoplay playsinline muted></video>
+    <div id="call-big"><video id="call-remote-video" autoplay playsinline muted></video></div>
+    <div id="call-camoff"><span style="font-size:56px">📷</span><span>دوربین خاموش است</span></div>
+    <div id="call-pip"><video id="call-local-video" autoplay playsinline muted></video></div>
     <audio id="call-remote-audio" autoplay></audio>
     <div id="call-overlay-top">
         <div id="call-avatar">👤</div>
@@ -2117,7 +2422,18 @@ CHAT_PAGE = r"""
         <div id="call-status-text">در حال اتصال…</div>
         <div id="call-quality"><span class="dot"></span><span id="call-quality-text">عالی</span></div>
     </div>
+    <div id="call-react-bar">
+        <span onclick="sendReaction('❤️')">❤️</span>
+        <span onclick="sendReaction('👍')">👍</span>
+        <span onclick="sendReaction('😂')">😂</span>
+        <span onclick="sendReaction('😮')">😮</span>
+        <span onclick="sendReaction('😢')">😢</span>
+        <span onclick="sendReaction('🔥')">🔥</span>
+        <span onclick="sendReaction('🎉')">🎉</span>
+        <span onclick="sendReaction('👏')">👏</span>
+    </div>
     <div id="call-controls">
+        <button class="call-btn" id="call-react-btn" onclick="toggleReactBar()" title="واکنش">😊</button>
         <button class="call-btn" id="call-mic-btn" onclick="toggleMic()" title="میکروفون">
             <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5-3c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
         </button>
@@ -4492,6 +4808,10 @@ CHAT_PAGE = r"""
     let callTimerInt = null, callStartTs = 0;
     let qualityInt = null;
     let ringTimer = null, ringCtx = null;
+    let disconnectTimer = null;    // ایمنی: اگر طرف مقابل قطع کرد ولی سیگنال نرسید
+    let reactBarTimer = null;
+    let pipDrag = null;
+    let localIsBig = false;        // آیا تصویر خودم تمام‌صفحه است (بعد از swap)
 
     function callEl(id){ return document.getElementById(id); }
 
@@ -4587,27 +4907,53 @@ CHAT_PAGE = r"""
         pc.ontrack = function(e){
             const stream = (e.streams && e.streams[0]) ? e.streams[0] : null;
             if(!stream) return;
-            if(e.track.kind === 'video'){
-                const v = callEl('call-remote-video');
-                if(v.srcObject !== stream){ v.srcObject = stream; }
-            }else{
-                const a = callEl('call-remote-audio');
-                if(a.srcObject !== stream){ a.srcObject = stream; }
-            }
+            // ویدیو در المان تصویر (بی‌صدا) و صدا در المان صوت → جلوگیری از دوبار پخش صدا/اکو
+            const v = callEl('call-remote-video');
+            const a = callEl('call-remote-audio');
+            if(v && v.srcObject !== stream){ v.srcObject = stream; v.muted = true; }
+            if(a && a.srcObject !== stream){ a.srcObject = stream; }
         };
         pc.onconnectionstatechange = function(){
             if(!pc) return;
             const st = pc.connectionState;
             if(st === 'connected'){
+                cancelAutoEnd();
                 onCallConnected();
             }else if(st === 'failed'){
                 setCallStatus('اتصال قطع شد، تلاش مجدد…');
                 tryIceRestart();
+                scheduleAutoEnd();
             }else if(st === 'disconnected'){
                 setCallStatus('اتصال ضعیف…');
+                scheduleAutoEnd();
+            }else if(st === 'closed'){
+                endCall();
             }
         };
+        pc.oniceconnectionstatechange = function(){
+            if(!pc) return;
+            const s = pc.iceConnectionState;
+            if(s === 'connected' || s === 'completed'){ cancelAutoEnd(); }
+            else if(s === 'failed' || s === 'disconnected'){ scheduleAutoEnd(); }
+        };
     }
+
+    // ایمنی (فقط backstop): اگر سیگنالِ قطع گم شد و اتصال هم مدتی طولانی قطع ماند، تماس را ببند.
+    // پنجره را بلند می‌گیریم (۲۵ ثانیه) چون روی شبکه‌های ضعیف موبایل، حالت disconnected
+    // اغلب گذراست و خودش ترمیم می‌شود؛ نباید تماسِ در حالِ بازیابی را زودهنگام قطع کنیم.
+    // (قطعِ عمدی توسط کاربر فوراً با سیگنال hangup / sendBeacon مدیریت می‌شود، نه این تایمر.)
+    function scheduleAutoEnd(){
+        if(disconnectTimer || !callActive) return;
+        disconnectTimer = setTimeout(function(){
+            disconnectTimer = null;
+            if(!pc || !callActive) return;
+            const bad = ['failed','disconnected','closed'];
+            if(bad.indexOf(pc.connectionState) !== -1 || bad.indexOf(pc.iceConnectionState) !== -1){
+                endCall();
+            }
+        }, 25000);
+    }
+    function cancelAutoEnd(){ if(disconnectTimer){ clearTimeout(disconnectTimer); disconnectTimer = null; } }
 
     async function tryIceRestart(){
         // فقط تماس‌گیرنده offer جدید با restartIce می‌سازد تا از حلقه جلوگیری شود
@@ -4701,6 +5047,7 @@ CHAT_PAGE = r"""
             await addRemoteCandidate(d.c);
             return;
         }
+        if(d.t === 'react'){ showFloatingEmoji(d.e); return; }
         if(d.t === 'busy'){ setCallStatus('مخاطب مشغول است'); setTimeout(()=>endCall(), 1500); return; }
         if(d.t === 'decline'){ setCallStatus('تماس رد شد'); setTimeout(()=>endCall(), 1200); return; }
         if(d.t === 'hangup'){ endCall(); return; }
@@ -4828,18 +5175,104 @@ CHAT_PAGE = r"""
             cb.classList.toggle('off', !camOn);
             cb.style.display = (callKind === 'video') ? '' : 'none';
         }
-        const lv = callEl('call-local-video');
-        if(lv) lv.style.opacity = camOn ? '1' : '0';
+        updateCamUI();
+    }
+    // مدیریت نمایش هنگام خاموش‌بودن دوربین (بسته به اینکه تصویرم بزرگ است یا کوچک)
+    function updateCamUI(){
+        const pip = callEl('call-pip'), badge = callEl('call-camoff');
+        const camOffVideo = (callKind === 'video' && !camOn);
+        if(badge) badge.style.display = (camOffVideo && localIsBig) ? 'flex' : 'none';
+        // اگر تصویرم در حالت کوچک است و دوربین خاموش، کادر کوچک را پنهان کن
+        if(pip) pip.style.opacity = (camOffVideo && !localIsBig) ? '0' : '1';
     }
 
     // ---------------------- UI ----------------------
     function showCallScreen(kind){
         const sc = callEl('call-screen');
+        resetCallLayout();
+        setupPipDrag();
         sc.classList.toggle('audio-only', kind !== 'video');
         sc.classList.add('show');
         callEl('call-peer-name').textContent = (document.getElementById('room-title')||{}).textContent || 'طرف مقابل';
         setQuality('good');
         updateCallButtons();
+    }
+
+    // --- چیدمان ویدیو: بزرگ/کوچک، جابه‌جایی و تمام‌صفحه ---
+    function resetCallLayout(){
+        const big = callEl('call-big'), pip = callEl('call-pip');
+        const rv = callEl('call-remote-video'), lv = callEl('call-local-video');
+        if(big && rv && rv.parentElement !== big) big.appendChild(rv);
+        if(pip && lv && lv.parentElement !== pip) pip.appendChild(lv);
+        if(pip){ pip.style.left=''; pip.style.top=''; pip.style.right=''; pip.style.bottom=''; }
+        localIsBig = false;
+        const rb = callEl('call-react-bar'); if(rb) rb.classList.remove('show');
+        updateCamUI();
+    }
+    function swapVideos(){
+        if(callKind !== 'video') return;   // فقط در تماس تصویری معنا دارد
+        const big = callEl('call-big'), pip = callEl('call-pip');
+        if(!big || !pip) return;
+        const bigVid = big.firstElementChild, pipVid = pip.firstElementChild;
+        if(bigVid && pipVid){ big.appendChild(pipVid); pip.appendChild(bigVid); }
+        localIsBig = !localIsBig;
+        updateCamUI();
+    }
+    function setupPipDrag(){
+        const pip = callEl('call-pip');
+        if(!pip || pip._dragSetup) return;
+        pip._dragSetup = true;
+        let startX=0, startY=0, origX=0, origY=0, moved=false, downAt=0;
+        pip.addEventListener('pointerdown', function(e){
+            e.preventDefault();
+            const r = pip.getBoundingClientRect();
+            startX=e.clientX; startY=e.clientY; origX=r.left; origY=r.top;
+            moved=false; downAt=Date.now();
+            try{ pip.setPointerCapture(e.pointerId); }catch(_){}
+            pipDrag = true;
+        });
+        pip.addEventListener('pointermove', function(e){
+            if(!pipDrag) return;
+            const dx=e.clientX-startX, dy=e.clientY-startY;
+            if(Math.abs(dx)>5 || Math.abs(dy)>5) moved=true;
+            let nx=origX+dx, ny=origY+dy;
+            const w=pip.offsetWidth, h=pip.offsetHeight;
+            nx=Math.max(6, Math.min(window.innerWidth-w-6, nx));
+            ny=Math.max(6, Math.min(window.innerHeight-h-6, ny));
+            pip.style.left=nx+'px'; pip.style.top=ny+'px'; pip.style.right='auto'; pip.style.bottom='auto';
+        });
+        const onUp = function(e){
+            if(!pipDrag) return;
+            pipDrag=false;
+            const wasTap = !moved && (Date.now()-downAt) < 400;
+            if(wasTap) swapVideos();   // زدن روی تصویر کوچک → تمام‌صفحه‌کردنش
+        };
+        pip.addEventListener('pointerup', onUp);
+        pip.addEventListener('pointercancel', onUp);
+    }
+
+    // --- واکنش ایموجی داخل تماس ---
+    function toggleReactBar(){
+        const rb = callEl('call-react-bar'); if(!rb) return;
+        rb.classList.toggle('show');
+        if(reactBarTimer){ clearTimeout(reactBarTimer); reactBarTimer=null; }
+        if(rb.classList.contains('show')) reactBarTimer = setTimeout(()=>rb.classList.remove('show'), 5000);
+    }
+    function sendReaction(emoji){
+        const rb = callEl('call-react-bar'); if(rb) rb.classList.remove('show');
+        showFloatingEmoji(emoji);
+        signalSend({t:'react', e:emoji});
+    }
+    function showFloatingEmoji(emoji){
+        const sc = callEl('call-screen'); if(!sc || !emoji) return;
+        const span = document.createElement('span');
+        span.className = 'call-float-emoji';
+        span.textContent = emoji;
+        span.style.left = (15 + Math.random()*60) + '%';
+        sc.appendChild(span);
+        const rm = ()=>{ try{ span.remove(); }catch(_){} };
+        span.addEventListener('animationend', rm);
+        setTimeout(rm, 3000);
     }
     function showIncoming(kind){
         callEl('ring-name').textContent = (document.getElementById('room-title')||{}).textContent || 'تماس ورودی';
@@ -4850,7 +5283,8 @@ CHAT_PAGE = r"""
     function hideIncoming(){ callEl('call-incoming').classList.remove('show'); }
 
     function endCall(){
-        try{ if(pc){ pc.onicecandidate=null; pc.ontrack=null; pc.onconnectionstatechange=null; pc.close(); } }catch(e){}
+        cancelAutoEnd();
+        try{ if(pc){ pc.onicecandidate=null; pc.ontrack=null; pc.onconnectionstatechange=null; pc.oniceconnectionstatechange=null; pc.close(); } }catch(e){}
         pc = null;
         if(localStream){ localStream.getTracks().forEach(t=>{ try{t.stop();}catch(e){} }); localStream = null; }
         callActive = false; incomingActive = false; callRole = null;
@@ -4863,6 +5297,7 @@ CHAT_PAGE = r"""
         if(lv) lv.srcObject = null;
         if(ra) ra.srcObject = null;
         callEl('call-screen').classList.remove('show');
+        resetCallLayout();
         hideIncoming();
     }
 
@@ -4900,10 +5335,24 @@ CHAT_PAGE = r"""
 
     function setCallStatus(t){ const el = callEl('call-status-text'); if(el) el.textContent = t; }
 
+    // هنگام بستن صفحه/تب، قطع تماس را مطمئن بفرست (fetch موقع unload لغو می‌شود، sendBeacon نه)
+    function beaconHangup(){
+        if(!callActive && !incomingActive) return;
+        try{
+            const payload = JSON.stringify({signal:{t:'hangup'}});
+            if(navigator.sendBeacon){
+                navigator.sendBeacon('/call_signal', new Blob([payload], {type:'application/json'}));
+            }else{
+                signalSend({t:'hangup'});
+            }
+        }catch(e){}
+    }
+    window.addEventListener('beforeunload', beaconHangup);
+    window.addEventListener('pagehide', beaconHangup);
+
     // راه‌اندازی اولیهٔ زیرسیستم تماس
     loadIceServers();
     callPollLoop();
-    window.addEventListener('beforeunload', function(){ if(callActive) signalSend({t:'hangup'}); });
 
 </script>
 </body>
@@ -5705,20 +6154,46 @@ if __name__ == "__main__":
     # راه‌اندازی خودکار TURN در پس‌زمینه (غیرکشنده؛ اگر شکست بخورد فقط تماس غیرفعال می‌شود)
     threading.Thread(target=setup_turn, daemon=True).start()
     
-    # شروع سرور
-    with ThreadingHTTPServer(("0.0.0.0", PORT), ChatHandler) as httpd:
-        scheme = "http"
-        if SSL_CERTFILE and SSL_KEYFILE and os.path.isfile(SSL_CERTFILE) and os.path.isfile(SSL_KEYFILE):
-            try:
-                import ssl
-                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                ctx.load_cert_chain(certfile=SSL_CERTFILE, keyfile=SSL_KEYFILE)
-                # handshake در ترد کارگر انجام می‌شود (نه ترد accept) تا یک کلاینت کند سرور را قفل نکند
-                httpd.ssl_context = ctx
-                scheme = "https"
-            except Exception as e:
-                logger.error(f"TLS فعال نشد ({e})؛ روی HTTP ادامه می‌دهد")
-        logger.info(f"سرور چت روی {scheme}://0.0.0.0:{PORT} شروع به کار کرد...")
+    # ویزارد آفلاین: تعیین پورت و گواهی TLS (بار اول تعاملی؛ بعد از روی پیکربندی)
+    eff_port, cert_file, key_file = resolve_tls_and_port()
+
+    # شروع سرور با fallback پورت: اگر پورت اصلی (مثلاً 443) قابل bind نبود
+    # (نبودِ root، اشغال‌بودن پورت و …) به پورت‌های جایگزین می‌رود تا چت همیشه بالا بیاید
+    server = None
+    bound_port = None
+    candidates = []
+    for c in (eff_port, 8443, PORT):
+        if c and c not in candidates:
+            candidates.append(c)
+    for cand in candidates:
+        try:
+            server = ThreadingHTTPServer(("0.0.0.0", cand), ChatHandler)
+            bound_port = cand
+            break
+        except OSError as e:
+            logger.error(f"bind روی پورت {cand} ناموفق ({e})؛ تلاش با پورت بعدی...")
+    if server is None:
+        logger.error("هیچ پورتی برای bind در دسترس نبود؛ سرور اجرا نشد")
+        sys.exit(1)
+    if bound_port != eff_port:
+        logger.warning(f"به‌جای پورت {eff_port} روی پورت {bound_port} اجرا شد "
+                       f"(برای URL بدون پورت روی 443، با sudo اجرا کن و پورت را آزاد نگه دار)")
+
+    scheme = "http"
+    if cert_file and key_file and os.path.isfile(cert_file) and os.path.isfile(key_file):
+        try:
+            import ssl
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=cert_file, keyfile=key_file)
+            # handshake در ترد کارگر انجام می‌شود (نه ترد accept) تا یک کلاینت کند سرور را قفل نکند
+            server.ssl_context = ctx
+            scheme = "https"
+            threading.Thread(target=_cert_reload_loop, args=(server, cert_file, key_file),
+                             daemon=True).start()
+        except Exception as e:
+            logger.error(f"TLS فعال نشد ({e})؛ روی HTTP ادامه می‌دهد")
+    with server as httpd:
+        logger.info(f"سرور چت روی {scheme}://0.0.0.0:{bound_port} شروع به کار کرد...")
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
